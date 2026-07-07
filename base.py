@@ -35,6 +35,7 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
+from requests.utils import requote_uri
 
 DATE_CHUNK_RE = re.compile(
     r"[A-Za-z]{3,9}\.?\s+\d{1,2}(?:,\s*\d{4})?\s+at\s+\d{1,2}(?::\d{2})?\s*[ap]m",
@@ -78,6 +79,23 @@ def parse_auction_date(text, upcoming_window_days=7):
         return None, "Unknown"
 
     return dt, classify_timing(dt, upcoming_window_days)
+
+
+def clean_url(url):
+    """
+    Fix hrefs extracted raw from HTML that contain unescaped characters --
+    most commonly a literal space in a filename (e.g. a linked PDF named
+    "Foreclosure Notice.pdf" on the source site). Browsers silently
+    tolerate this when the link is live in a page and gets clicked, but a
+    raw space is not a valid URL character -- once extracted as plain text
+    into a CSV, different tools handle it differently, and several just
+    truncate the URL at the space. requote_uri re-quotes only the parts
+    that need it, without double-encoding segments that are already
+    properly percent-encoded.
+    """
+    if not url:
+        return url
+    return requote_uri(url)
 
 
 def geocode_batch(addresses):

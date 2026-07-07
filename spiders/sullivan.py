@@ -3,7 +3,7 @@
 import re
 from urllib.parse import urljoin
 
-from base import AuctionSpider
+from base import AuctionSpider, clean_url
 
 
 class SullivanSpider(AuctionSpider):
@@ -36,7 +36,7 @@ class SullivanSpider(AuctionSpider):
             url = urljoin(self.base_url, link["href"])
             auction_id = re.search(r"id=(\d+)", url)
             auction_id = auction_id.group(1) if auction_id else None
-            
+
             rows.append({
                 "id": auction_id,
                 "url": url,
@@ -50,7 +50,7 @@ class SullivanSpider(AuctionSpider):
 
     def parse_detail(self, soup, row):
         pdf_links = [
-            a["href"] for a in soup.find_all("a", href=True)
+            clean_url(a["href"]) for a in soup.find_all("a", href=True)
             if a["href"].lower().endswith(".pdf")
         ]
 

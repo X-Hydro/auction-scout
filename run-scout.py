@@ -21,6 +21,7 @@ from spiders.harmon import HarmonSpider
 from spiders.brockscott import BrockScottSpider
 from spiders.jjmanning import JJManningSpider
 from spiders.towne import TowneAuctionSpider
+from spiders.patriot import PatriotSpider
 from base import geocode_batch
 
 # Spiders that are implemented and ready to run.
@@ -30,6 +31,7 @@ REGISTRY = {
     "brockscott": BrockScottSpider,
     "jjmanning": JJManningSpider,
     "towne": TowneAuctionSpider,
+    "patriot": PatriotSpider,
 }
 
 # Spiders that exist as a stub but are intentionally not runnable yet

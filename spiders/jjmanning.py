@@ -43,7 +43,7 @@ here (unlike Brock & Scott's numeric MM/DD/YYYY format).
 import json
 import re
 
-from base import AuctionSpider
+from base import AuctionSpider, clean_url
 
 
 def _acf_fields(soup):
@@ -133,7 +133,7 @@ class JJManningSpider(AuctionSpider):
         description = _description_text(soup) or row.get("description", "")
 
         pdf_links = [
-            a["href"] for a in soup.find_all("a", href=True)
+            clean_url(a["href"]) for a in soup.find_all("a", href=True)
             if a["href"].lower().endswith(".pdf")
         ]
 
