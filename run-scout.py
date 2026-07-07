@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent / "spiders"))
 from spiders.sullivan import SullivanSpider
 from spiders.harmon import HarmonSpider
 from spiders.brockscott import BrockScottSpider
+from spiders.jjmanning import JJManningSpider
 from base import geocode_batch
 
 # Spiders that are implemented and ready to run.
@@ -26,6 +27,7 @@ REGISTRY = {
     "sullivan": SullivanSpider,
     "harmon": HarmonSpider,
     "brockscott": BrockScottSpider,
+    "jjmanning": JJManningSpider,
 }
 
 # Spiders that exist as a stub but are intentionally not runnable yet
