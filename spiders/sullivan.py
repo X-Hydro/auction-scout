@@ -36,7 +36,7 @@ class SullivanSpider(AuctionSpider):
             url = urljoin(self.base_url, link["href"])
             auction_id = re.search(r"id=(\d+)", url)
             auction_id = auction_id.group(1) if auction_id else None
-
+            
             rows.append({
                 "id": auction_id,
                 "url": url,

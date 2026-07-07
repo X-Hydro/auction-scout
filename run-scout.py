@@ -18,12 +18,14 @@ sys.path.insert(0, str(Path(__file__).parent / "spiders"))
 
 from spiders.sullivan import SullivanSpider
 from spiders.harmon import HarmonSpider
+from spiders.brockscott import BrockScottSpider
 from base import geocode_batch
 
 # Spiders that are implemented and ready to run.
 REGISTRY = {
     "sullivan": SullivanSpider,
     "harmon": HarmonSpider,
+    "brockscott": BrockScottSpider,
 }
 
 # Spiders that exist as a stub but are intentionally not runnable yet
@@ -31,7 +33,7 @@ REGISTRY = {
 # explanation instead of an argparse "invalid choice" error.
 KNOWN_UNAVAILABLE = {}
 
-OUT_PATH = "markers.csv"
+DEFAULT_OUT_PATH = "markers.csv"  # used when multiple spiders ran in one pass
 FIELDNAMES = [
     "Name", "Latitude", "Longitude", "Source", "State", "Timing",
     "Description", "Auction Date/Time", "Status", "PDF Links", "URL",
@@ -143,16 +145,25 @@ def main():
         for r in unmatched:
             print(f"  - [{r['source']}] {r['street']}, {r['city_state']}")
 
-    written = write_csv(OUT_PATH, all_rows)
-    print(f"Wrote {OUT_PATH} ({written} markers from {len(spider_classes)} spider(s))")
+    if len(spider_classes) == 1:
+        out_path = f"{spider_classes[0].name}.csv"
+    else:
+        out_path = DEFAULT_OUT_PATH
+
+    written = write_csv(out_path, all_rows)
+    print(f"Wrote {out_path} ({written} markers from {len(spider_classes)} spider(s))")
 
     if args.split_output:
         sources = sorted({row["source"] for row in all_rows})
-        for source in sources:
-            source_rows = [r for r in all_rows if r["source"] == source]
-            path = f"{source}_markers.csv"
-            n = write_csv(path, source_rows)
-            print(f"Wrote {path} ({n} markers)")
+        if len(sources) <= 1:
+            print("--split-output skipped: only one source in this run, "
+                  f"same as {out_path}")
+        else:
+            for source in sources:
+                source_rows = [r for r in all_rows if r["source"] == source]
+                path = f"{source}_markers.csv"
+                n = write_csv(path, source_rows)
+                print(f"Wrote {path} ({n} markers)")
 
 
 if __name__ == "__main__":

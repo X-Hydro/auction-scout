@@ -42,6 +42,19 @@ DATE_CHUNK_RE = re.compile(
 )
 
 
+def classify_timing(dt, upcoming_window_days=7):
+    """Shared by every site's date parser: given a real datetime (or None),
+    classify it as 'This Week' / 'Later' / 'Past' / 'Unknown'."""
+    if dt is None:
+        return "Unknown"
+    delta_days = (dt - datetime.now()).total_seconds() / 86400
+    if delta_days < 0:
+        return "Past"
+    if delta_days <= upcoming_window_days:
+        return "This Week"
+    return "Later"
+
+
 def parse_auction_date(text, upcoming_window_days=7):
     """
     Parse a scraped date string into a datetime, and classify it as
@@ -50,6 +63,11 @@ def parse_auction_date(text, upcoming_window_days=7):
     Handles postponed-auction strings that contain TWO dates
     ('Thu. Jul. 9 at 11 am Mon. Aug. 10, 2026 at 1 pm') by taking the
     LAST date chunk, which is always the current/rescheduled one.
+
+    NOTE: this specific parser assumes Sullivan/Harmon-style text dates
+    ('Jul. 9 at 11 am'). Sites with a different date format (e.g. numeric
+    MM/DD/YYYY) should write their own small extraction function and call
+    classify_timing(dt) directly -- see spiders/brockscott.py for an example.
     """
     matches = DATE_CHUNK_RE.findall(text)
     candidate = matches[-1] if matches else text
@@ -59,14 +77,7 @@ def parse_auction_date(text, upcoming_window_days=7):
     except (ValueError, OverflowError):
         return None, "Unknown"
 
-    delta_days = (dt - datetime.now()).total_seconds() / 86400
-    if delta_days < 0:
-        timing = "Past"
-    elif delta_days <= upcoming_window_days:
-        timing = "This Week"
-    else:
-        timing = "Later"
-    return dt, timing
+    return dt, classify_timing(dt, upcoming_window_days)
 
 
 def geocode_batch(addresses):
