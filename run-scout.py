@@ -17,19 +17,19 @@ sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent / "spiders"))
 
 from spiders.sullivan import SullivanSpider
+from spiders.harmon import HarmonSpider
 from base import geocode_batch
 
 # Spiders that are implemented and ready to run.
 REGISTRY = {
     "sullivan": SullivanSpider,
+    "harmon": HarmonSpider,
 }
 
 # Spiders that exist as a stub but are intentionally not runnable yet
 # (e.g. blocked by robots.txt) -- listed here so --spiders gives a clear
 # explanation instead of an argparse "invalid choice" error.
-KNOWN_UNAVAILABLE = {
-    "harmon": "blocked by robots.txt on /auction/* -- see spiders/harmon.py for details",
-}
+KNOWN_UNAVAILABLE = {}
 
 OUT_PATH = "markers.csv"
 FIELDNAMES = [
@@ -47,6 +47,11 @@ def parse_args():
         help=f"Which spider(s) to run. Choices: {', '.join(all_choices)}. Default: all",
     )
     p.add_argument("--list", action="store_true", help="List registered spiders and exit")
+    p.add_argument(
+        "--split-output", action="store_true",
+        help="Also write a separate {source}_markers.csv per spider, "
+             "in addition to the merged markers.csv",
+    )
     return p.parse_args()
 
 
@@ -62,6 +67,36 @@ def resolve_spiders(names):
         spider_classes.append(REGISTRY[name])
 
     return spider_classes
+
+
+def format_row(row):
+    state = row["city_state"].split(",")[-1].strip() if "," in row["city_state"] else ""
+    return {
+        "Name": f"{row['street']}, {row['city_state']}",
+        "Latitude": row["latitude"],
+        "Longitude": row["longitude"],
+        "Source": row["source"],
+        "State": state,
+        "Timing": row.get("timing", "Unknown"),
+        "Description": f"{row.get('description', '')} | {row.get('extra_fields', '')}",
+        "Auction Date/Time": row["date_time"],
+        "Status": row["status"],
+        "PDF Links": row.get("pdf_links", ""),
+        "URL": row["url"],
+    }
+
+
+def write_csv(path, rows):
+    written = 0
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+        writer.writeheader()
+        for row in rows:
+            if row["latitude"] is None:
+                continue
+            writer.writerow(format_row(row))
+            written += 1
+    return written
 
 
 def main():
@@ -108,30 +143,16 @@ def main():
         for r in unmatched:
             print(f"  - [{r['source']}] {r['street']}, {r['city_state']}")
 
-    written = 0
-    with open(OUT_PATH, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
-        writer.writeheader()
-        for row in all_rows:
-            if row["latitude"] is None:
-                continue
-            state = row["city_state"].split(",")[-1].strip() if "," in row["city_state"] else ""
-            writer.writerow({
-                "Name": f"{row['street']}, {row['city_state']}",
-                "Latitude": row["latitude"],
-                "Longitude": row["longitude"],
-                "Source": row["source"],
-                "State": state,
-                "Timing": row.get("timing", "Unknown"),
-                "Description": f"{row.get('description', '')} | {row.get('extra_fields', '')}",
-                "Auction Date/Time": row["date_time"],
-                "Status": row["status"],
-                "PDF Links": row.get("pdf_links", ""),
-                "URL": row["url"],
-            })
-            written += 1
-
+    written = write_csv(OUT_PATH, all_rows)
     print(f"Wrote {OUT_PATH} ({written} markers from {len(spider_classes)} spider(s))")
+
+    if args.split_output:
+        sources = sorted({row["source"] for row in all_rows})
+        for source in sources:
+            source_rows = [r for r in all_rows if r["source"] == source]
+            path = f"{source}_markers.csv"
+            n = write_csv(path, source_rows)
+            print(f"Wrote {path} ({n} markers)")
 
 
 if __name__ == "__main__":

@@ -120,7 +120,21 @@ class AuctionSpider(ABC):
     request_delay = 1.0
     user_agent = "Mozilla/5.0 (compatible; auction-mapper/1.0; +research use)"
 
+    # Default: honor robots.txt, fail closed if it can't be verified.
+    # Set to False in a specific spider ONLY when you have actual, direct
+    # permission from that site's owner -- and say so in a comment right at
+    # the override, since this is meant to be an explicit, visible exception
+    # per-site, never a blanket "ignore robots.txt" switch. See
+    # spiders/harmon.py for a real example of when/why this was used.
+    respect_robots = True
+
     def __init__(self):
+        if not self.respect_robots:
+            print(f"[{self.name}] respect_robots=False -- robots.txt check "
+                  f"skipped for this spider (see class docstring for why)")
+            self._robots = "__bypassed__"  # sentinel, see allowed()
+            return
+
         self._robots = urllib.robotparser.RobotFileParser()
         robots_url = urljoin(self.base_url, "/robots.txt")
         try:
@@ -172,9 +186,12 @@ class AuctionSpider(ABC):
     # ---- shared plumbing --------------------------------------------
 
     def allowed(self, url):
+        if self._robots == "__bypassed__":
+            return True
         if self._robots is None:
             return False  # fail closed -- couldn't verify permission
         return self._robots.can_fetch(self.user_agent, url)
+
 
     def get_soup(self, url):
         if not self.allowed(url):
