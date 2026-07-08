@@ -36,6 +36,7 @@ EXCLUDED_STATUSES = (
     "canceled",
     "cancelled",
     "withdrawn",
+    'bank buy back'
 )
 
 # If a property hasn't been re-confirmed by a scrape within this many days,

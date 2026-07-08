@@ -60,13 +60,47 @@ class TestParseDescription:
 
 
 class TestExtractListingId:
-    def test_extracts_id_param(self):
+    def test_sullivan_id_param(self):
         url = "https://sullivan-auctioneers.com/auction/?id=21007"
         assert load_csv.extract_listing_id(url) == "21007"
 
-    def test_falls_back_to_full_url_if_no_id(self):
+    def test_patriot_id_param(self):
+        url = "https://patriotauctioneers.com/calendar-detail/?id=21306"
+        assert load_csv.extract_listing_id(url) == "21306"
+
+    def test_harmon_law_path_based_id(self):
+        url = "https://www.harmonlawoffices.com/auction/1942"
+        assert load_csv.extract_listing_id(url) == "1942"
+
+    def test_brock_and_scott_falls_back_honestly(self):
+        """No confirmed per-listing URL pattern exists for this source yet —
+        the real example we have is a paginated index page, not a detail
+        page. It should fall back to the full URL, not a fabricated pattern."""
+        url = "https://www.brockandscott.com/foreclosure-sales/?sf_paged=2"
+        assert load_csv.extract_listing_id(url) == url
+
+    def test_unrecognized_source_falls_back_to_full_url(self):
         url = "https://example.com/listing/some-property"
         assert load_csv.extract_listing_id(url) == url
+
+    def test_towne_uses_address_slug_not_shared_url(self):
+        """Towne's site has no per-listing detail page — every row shares
+        the exact same base URL. Confirmed from real scraped data: this
+        caused 7 different properties to silently collapse into 1 database
+        row before the fix (see TestLoadPipeline.test_towne_shared_url_...)."""
+        url = "https://currentauctions.towneauction.com/"
+        id1 = load_csv.extract_listing_id(url, "19 Mill Hill Street, Randolph, MA 02368")
+        id2 = load_csv.extract_listing_id(url, "39 Mill Pond Road, Durham, NH 03824")
+        assert id1 != id2
+        assert id1 == "19-mill-hill-street-randolph-ma-02368"
+
+    def test_towne_same_address_produces_same_id(self):
+        """The whole point of the slug: the SAME address across two
+        different runs must still produce the SAME id, or every run would
+        look like the old listing disappeared and a new one appeared."""
+        url = "https://currentauctions.towneauction.com/"
+        addr = "19 Mill Hill Street, Randolph, MA 02368"
+        assert load_csv.extract_listing_id(url, addr) == load_csv.extract_listing_id(url, addr)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -224,6 +258,33 @@ class TestLoadPipeline:
             "SELECT COUNT(*) FROM auction_events WHERE event_type='disappeared'"
         ).fetchone()[0]
         assert disappeared == 0  # harmon_law shouldn't be flagged — it wasn't in this run at all
+        conn.close()
+
+    def test_towne_shared_url_does_not_collapse_multiple_listings(self, db_path, tmp_path):
+        """Regression test for a real bug found in production data: Towne's
+        site shares one URL across every listing (no per-listing detail
+        page). Before the fix, this silently merged multiple distinct
+        properties into a single database row, each overwriting the last —
+        producing nonsensical chains of dozens of 'date changes' all
+        attributed to one address."""
+        towne_row = lambda name, date: {
+            "Name": name, "Latitude": "42.0", "Longitude": "-71.0", "Source": "towne",
+            "State": "MA", "Timing": "Later", "Description": "County: Test",
+            "Auction Date/Time": date, "Status": "on_time", "PDF Links": "",
+            "URL": "https://currentauctions.towneauction.com/",
+        }
+        rows = [
+            towne_row("19 Mill Hill Street, Randolph, MA 02368", "08/21/26 1:00 PM"),
+            towne_row("39 Mill Pond Road, Durham, NH 03824", "08/25/26 1:00 PM"),
+            towne_row("200 Diamond Hill Road, Warwick, RI 02886", "09/03/26 1:00 PM"),
+        ]
+        csv_path = str(tmp_path / "towne.csv")
+        write_csv(csv_path, rows)
+        load_csv.load(csv_path, db_path)
+
+        conn = sqlite3.connect(db_path)
+        count = conn.execute("SELECT COUNT(*) FROM properties WHERE source='towne'").fetchone()[0]
+        assert count == 3  # not 1 — this is the actual bug that shipped
         conn.close()
 
     def test_schema_optional_when_db_already_initialized(self, db_path, tmp_path, sample_row, monkeypatch):

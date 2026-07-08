@@ -25,11 +25,59 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-def extract_listing_id(url: str) -> str:
-    """Pull the ?id= param from the auction URL. Falls back to the full URL if absent."""
-    qs = parse_qs(urlparse(url).query)
+def _slugify(text: str) -> str:
+    """Lowercase, alphanumeric-and-hyphens only — mirrors the same spirit of
+    slug generation the Towne spider itself already does internally."""
+    s = text.lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    return s.strip("-")
+
+
+def extract_listing_id(url: str, address: str = "") -> str:
+    """
+    Pulls a stable per-source listing ID out of an auction URL. Different
+    sources encode this differently — matched by domain rather than the
+    CSV's Source column, since that's directly verifiable from the URL
+    itself rather than assuming a naming convention.
+
+    Confirmed patterns:
+      sullivan-auctioneers.com : ?id=21007
+      patriotauctioneers.com   : ?id=21306
+      harmonlawoffices.com     : /auction/1942            (path, not query)
+
+    Special case: towneauction.com has NO per-listing detail page at all —
+    every single row shares the exact same base URL (confirmed from real
+    scraped data: 7 different Towne properties all had the identical URL).
+    Using the raw URL as the listing ID would collapse every Towne listing
+    into a single database row, silently overwriting each one with the
+    next as the CSV is processed. The address is the only thing that
+    actually varies per listing on this site, so it's used as the ID
+    instead — mirroring the Towne spider's own internal use of an
+    address-derived slug for the same reason.
+
+    Unconfirmed sources (JJManning, Brock & Scott) fall through to the
+    generic ?id= attempt, then to the full URL as a last resort — dedup
+    still works correctly either way (the URL itself is unique and
+    stable for those sources), just less cleanly than a proper extracted
+    ID. Update this once real per-listing detail-page URLs are confirmed.
+    """
+    parsed = urlparse(url)
+    domain = parsed.netloc.lower()
+    qs = parse_qs(parsed.query)
+
+    if "harmonlawoffices.com" in domain:
+        segments = [s for s in parsed.path.split("/") if s]
+        if segments and segments[-1].isdigit():
+            return segments[-1]
+
+    if "towneauction.com" in domain:
+        return _slugify(address) if address else url
+
+    # sullivan-auctioneers.com, patriotauctioneers.com, and any other/future
+    # source using a plain ?id= param all fall through to here.
     if "id" in qs:
         return qs["id"][0]
+
     return url
 
 
@@ -99,6 +147,88 @@ def parse_description(desc: str) -> dict:
     return out
 
 
+def _fmt_dt(iso_str):
+    """ISO8601 -> 'Jul 8 11:00 AM'. Avoids strftime's %-d (not supported on
+    Windows) by building the string manually instead."""
+    if not iso_str:
+        return "TBD"
+    try:
+        dt = datetime.fromisoformat(iso_str)
+    except ValueError:
+        return iso_str
+    hour12 = dt.hour % 12 or 12
+    ampm = "AM" if dt.hour < 12 else "PM"
+    return f"{dt.strftime('%b')} {dt.day} {hour12}:{dt.minute:02d} {ampm}"
+
+
+REPORT_WIDTH = 100
+
+
+def build_report(run_id, started_at, csv_path, db_path, records_found, records_new,
+                 records_changed, disappeared_count, records_failed, failures, cur):
+    events = cur.execute(
+        """SELECT e.event_type, e.old_value, e.new_value, p.address_raw
+           FROM auction_events e
+                    JOIN auctions a ON a.auction_id = e.auction_id
+                    JOIN properties p ON p.property_id = a.property_id
+           WHERE e.spider_run_id = ?
+           ORDER BY p.address_raw""",
+        (run_id,),
+    ).fetchall()
+
+    by_type = {"status_change": [], "date_change": [], "first_seen": [], "disappeared": []}
+    for event_type, old_value, new_value, address in events:
+        if event_type in by_type:
+            by_type[event_type].append((address, old_value, new_value))
+
+    def section(title, rows, formatter):
+        header = f"{title} ({len(rows)})"
+        lines = [header, "-" * len(header)]
+        if rows:
+            lines.extend(f"  {formatter(r)}" for r in rows)
+        else:
+            lines.append("  (none)")
+        lines.append("")
+        return lines
+
+    L = []
+    L.append("=" * REPORT_WIDTH)
+    L.append("AuctionScout Import Report".center(REPORT_WIDTH))
+    L.append("=" * REPORT_WIDTH)
+    L.append(f"Run ID:    {run_id}")
+    L.append(f"Started:   {started_at}")
+    L.append(f"CSV File:  {csv_path}")
+    L.append(f"Database:  {db_path}")
+    L.append("")
+    L.append("SUMMARY")
+    L.append("-" * REPORT_WIDTH)
+    L.append(f"Listings processed:    {records_found}")
+    L.append(f"New properties:        {records_new}")
+    L.append(f"Changed auctions:      {records_changed}")
+    L.append(f"Disappeared listings:  {disappeared_count}")
+    L.append(f"Failed rows:           {records_failed}")
+    L.append("")
+    L.append("CHANGES")
+    L.append("-" * REPORT_WIDTH)
+    L.extend(section("Status changes", by_type["status_change"],
+                     lambda r: f"{r[0]:<40} {r[1]} -> {r[2]}"))
+    L.extend(section("Auction date changes", by_type["date_change"],
+                     lambda r: f"{r[0]:<40} {_fmt_dt(r[1])} -> {_fmt_dt(r[2])}"))
+    L.extend(section("New listings", by_type["first_seen"], lambda r: r[0]))
+    L.extend(section("Disappeared", by_type["disappeared"], lambda r: r[0]))
+
+    L.append("FAILED ROWS")
+    L.append("-" * REPORT_WIDTH)
+    if failures:
+        for f in failures:
+            L.append(f"  line {f['line_num']} ({f['address']}): {f['error']}")
+    else:
+        L.append("(none)")
+    L.append("=" * REPORT_WIDTH)
+
+    return "\n".join(L)
+
+
 def load(csv_path: str, db_path: str):
     if not os.path.exists(csv_path):
         print(f"ERROR: CSV file not found: {csv_path}")
@@ -153,7 +283,7 @@ def load(csv_path: str, db_path: str):
             try:
                 source_name = row["Source"]
                 sources_in_this_run.add(source_name)
-                listing_id = extract_listing_id(row["URL"])
+                listing_id = extract_listing_id(row["URL"], row["Name"])
                 parsed_desc = parse_description(row["Description"])
                 auction_dt = parse_auction_datetime(row["Auction Date/Time"])
                 status = row["Status"].strip().lower()
@@ -250,7 +380,8 @@ def load(csv_path: str, db_path: str):
             except Exception as e:
                 records_failed += 1
                 addr = row.get("Name", "<unknown address>")
-                failures.append(f"  line {line_num} ({addr}): {type(e).__name__}: {e}")
+                failures.append({"line_num": line_num, "address": addr,
+                                 "error": f"{type(e).__name__}: {e}"})
                 continue
 
     # --- Detect disappeared listings: present in a prior run, absent from this
@@ -296,14 +427,20 @@ def load(csv_path: str, db_path: str):
                                   records_new=?, records_changed=?, status='success' WHERE run_id=?""",
         (source_name or "unknown", now_iso(), records_found, records_new, records_changed, run_id),
     )
-
     conn.commit()
-    print(f"Run {run_id}: {records_found} found, {records_new} new, {records_changed} changed, "
-          f"{records_failed} failed, {disappeared_count} newly disappeared")
-    if failures:
-        print(f"\n{records_failed} row(s) failed to load:")
-        for f in failures:
-            print(f)
+
+    report = build_report(run_id, ts, csv_path, db_path, records_found, records_new,
+                          records_changed, disappeared_count, records_failed, failures, cur)
+    print(report)
+
+    reports_dir = os.path.join(SCRIPT_DIR, "reports")
+    os.makedirs(reports_dir, exist_ok=True)
+    report_filename = f"run_{run_id}_{ts[:10]}.txt"
+    report_path = os.path.join(reports_dir, report_filename)
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(report)
+    print(f"\nReport saved to {report_path}")
+
     conn.close()
 
 
