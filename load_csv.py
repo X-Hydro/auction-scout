@@ -308,6 +308,21 @@ def load(csv_path: str, db_path: str):
 
 
 if __name__ == "__main__":
-    csv_path = sys.argv[1] if len(sys.argv) > 1 else "markers.csv"
-    db_path = sys.argv[2] if len(sys.argv) > 2 else "auctionscout.db"
-    load(csv_path, db_path)
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Load an AuctionScout markers.csv file into the SQLite database."
+    )
+    parser.add_argument(
+        "--csv",
+        required=True,
+        help="Path to the markers.csv file to import."
+    )
+    parser.add_argument(
+        "--db",
+        default="auctionscout.db",
+        help="SQLite database file (default: auctionscout.db)"
+    )
+
+    args = parser.parse_args()
+    load(args.csv, args.db)

@@ -120,6 +120,8 @@ class TowneAuctionSpider(AuctionSpider):
 
             addr_id = _slug(f"{street}-{city}-{state}-{zip_code}")
 
+            print(f"towne property: {street}-{city}-{state}-{zip_code}")
+
             description_parts = [
                 f"County: {county}" if county else "",
                 f"Page/Liber: {page_liber}" if page_liber and page_liber != "\xa0" else "",
