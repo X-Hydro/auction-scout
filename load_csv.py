@@ -100,17 +100,18 @@ def parse_description(desc: str) -> dict:
 
 
 def load(csv_path: str, db_path: str):
-    schema_path = os.path.join(SCRIPT_DIR, "createAuctionScoutDB.sql")
-    if not os.path.exists(schema_path):
-        print(f"ERROR: schema.sql not found at {schema_path}")
-        print("Make sure schema.sql sits in the same folder as load_csv.py.")
-        sys.exit(1)
     if not os.path.exists(csv_path):
         print(f"ERROR: CSV file not found: {csv_path}")
         sys.exit(1)
 
     conn = sqlite3.connect(db_path)
-    conn.executescript(open(schema_path, encoding="utf-8").read())
+
+    schema_path = os.path.join(SCRIPT_DIR, "schema.sql")
+    if os.path.exists(schema_path):
+        conn.executescript(open(schema_path, encoding="utf-8").read())
+    # If schema.sql isn't present, assume db_path already has the tables
+    # (e.g. this is an existing database) and proceed without it.
+
     cur = conn.cursor()
 
     ts = now_iso()
@@ -120,11 +121,18 @@ def load(csv_path: str, db_path: str):
     records_failed = 0
     failures = []
     source_name = None
+    sources_in_this_run = set()
 
-    cur.execute(
-        "INSERT INTO spider_runs (source, started_at, status) VALUES (?, ?, 'running')",
-        ("pending", ts),
-    )
+    try:
+        cur.execute(
+            "INSERT INTO spider_runs (source, started_at, status) VALUES (?, ?, 'running')",
+            ("pending", ts),
+        )
+    except sqlite3.OperationalError as e:
+        print(f"ERROR: database at {db_path} doesn't have the expected tables ({e}).")
+        print("Either place schema.sql alongside load_csv.py to initialize a fresh "
+              "database, or point db_path at an existing AuctionScout database.")
+        sys.exit(1)
     run_id = cur.lastrowid
 
     # utf-8-sig transparently strips a UTF-8 BOM if present (common when a CSV
@@ -133,7 +141,7 @@ def load(csv_path: str, db_path: str):
     with open(csv_path, newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         expected_cols = {"Name", "Latitude", "Longitude", "Source", "State",
-                          "Description", "Auction Date/Time", "Status", "PDF Links", "URL"}
+                         "Description", "Auction Date/Time", "Status", "PDF Links", "URL"}
         missing_cols = expected_cols - set(reader.fieldnames or [])
         if missing_cols:
             print(f"ERROR: CSV is missing expected column(s): {sorted(missing_cols)}")
@@ -144,6 +152,7 @@ def load(csv_path: str, db_path: str):
             records_found += 1
             try:
                 source_name = row["Source"]
+                sources_in_this_run.add(source_name)
                 listing_id = extract_listing_id(row["URL"])
                 parsed_desc = parse_description(row["Description"])
                 auction_dt = parse_auction_datetime(row["Auction Date/Time"])
@@ -229,9 +238,9 @@ def load(csv_path: str, db_path: str):
 
                     cur.execute(
                         """UPDATE auctions SET
-                           auction_datetime_raw=?, auction_datetime=?, status=?,
-                           description_raw=?, property_type=?, bedrooms=?, bathrooms=?, sqft=?,
-                           lot_size_raw=?, year_built=?, mortgage_ref=?, source_url=?, last_updated_at=?
+                                               auction_datetime_raw=?, auction_datetime=?, status=?,
+                                               description_raw=?, property_type=?, bedrooms=?, bathrooms=?, sqft=?,
+                                               lot_size_raw=?, year_built=?, mortgage_ref=?, source_url=?, last_updated_at=?
                            WHERE auction_id=?""",
                         (row["Auction Date/Time"], auction_dt, status, row["Description"],
                          parsed_desc["property_type"], parsed_desc["bedrooms"], parsed_desc["bathrooms"],
@@ -244,14 +253,53 @@ def load(csv_path: str, db_path: str):
                 failures.append(f"  line {line_num} ({addr}): {type(e).__name__}: {e}")
                 continue
 
+    # --- Detect disappeared listings: present in a prior run, absent from this
+    # one, for a source we actually scraped this time. We don't guess WHY it
+    # vanished (sold, canceled, or a scraper miss) — just record the fact,
+    # once, so it's visible in the audit trail. export_json.py's staleness
+    # cutoff is what actually keeps it off the live map.
+    #
+    # NOTE: if sources_in_this_run is empty (a completely empty CSV — zero
+    # rows for every source), this intentionally does NOT run at all. A
+    # zero-row file can't distinguish "this source genuinely has no live
+    # listings right now" from "the scraper crashed and produced nothing" —
+    # treating those the same would risk mass-marking everything from a
+    # source as disappeared just because of a bad scraper run.
+    disappeared_count = 0
+    if sources_in_this_run:
+        src_placeholders = ",".join("?" for _ in sources_in_this_run)
+        stale_candidates = cur.execute(
+            f"""SELECT p.property_id, p.address_raw, p.source, a.auction_id, a.status
+                FROM properties p
+                JOIN auctions a ON a.property_id = p.property_id
+                WHERE p.source IN ({src_placeholders}) AND p.last_seen_at != ?""",
+            (*sources_in_this_run, ts),
+        ).fetchall()
+        for property_id, address, src, auction_id, status in stale_candidates:
+            last_event = cur.execute(
+                """SELECT event_type FROM auction_events WHERE auction_id=?
+                   ORDER BY event_id DESC LIMIT 1""",
+                (auction_id,),
+            ).fetchone()
+            if last_event and last_event[0] == "disappeared":
+                continue  # already flagged on a prior run — don't spam the log
+            cur.execute(
+                """INSERT INTO auction_events
+                   (auction_id, event_type, old_value, new_value, detected_at, spider_run_id)
+                   VALUES (?, 'disappeared', ?, NULL, ?, ?)""",
+                (auction_id, status, ts, run_id),
+            )
+            disappeared_count += 1
+
     cur.execute(
         """UPDATE spider_runs SET source=?, finished_at=?, records_found=?,
-           records_new=?, records_changed=?, status='success' WHERE run_id=?""",
-        (source_name, now_iso(), records_found, records_new, records_changed, run_id),
+                                  records_new=?, records_changed=?, status='success' WHERE run_id=?""",
+        (source_name or "unknown", now_iso(), records_found, records_new, records_changed, run_id),
     )
 
     conn.commit()
-    print(f"Run {run_id}: {records_found} found, {records_new} new, {records_changed} changed, {records_failed} failed")
+    print(f"Run {run_id}: {records_found} found, {records_new} new, {records_changed} changed, "
+          f"{records_failed} failed, {disappeared_count} newly disappeared")
     if failures:
         print(f"\n{records_failed} row(s) failed to load:")
         for f in failures:

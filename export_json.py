@@ -25,6 +25,7 @@ Design notes:
 import json
 import sqlite3
 import sys
+from datetime import datetime, timedelta, timezone
 
 # Statuses that mean the auction is over and should NOT appear on the live map.
 # Add to this list as new terminal-status wording turns up across sources.
@@ -37,10 +38,33 @@ EXCLUDED_STATUSES = (
     "withdrawn",
 )
 
+# If a property hasn't been re-confirmed by a scrape within this many days,
+# treat it as no longer live regardless of its last recorded status — a
+# source may have quietly removed a listing without our ever seeing an
+# explicit status change (see load_csv.py's "disappeared" event detection).
+# Set generously above the expected weekly run cadence to tolerate a missed
+# run or two without prematurely hiding still-valid listings.
+STALE_AFTER_DAYS = 14
+
 
 def export(db_path: str, json_path: str):
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+
+    has_dedup_table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='property_duplicate_links'"
+    ).fetchone() is not None
+    dedup_exclusion = (
+        "AND p.property_id NOT IN (SELECT property_id FROM property_duplicate_links)"
+        if has_dedup_table else ""
+    )
+    if not has_dedup_table:
+        print("Note: property_duplicate_links table not found — skipping duplicate "
+              "exclusion (run dedup_properties.py after updating schema.sql to enable it).")
+
+    # ISO8601 timestamps compare correctly as plain strings, so this avoids
+    # relying on SQLite's date-function parsing of the exact format we write.
+    stale_cutoff = (datetime.now(timezone.utc) - timedelta(days=STALE_AFTER_DAYS)).isoformat()
 
     placeholders = ",".join("?" for _ in EXCLUDED_STATUSES)
     rows = conn.execute(
@@ -66,10 +90,12 @@ def export(db_path: str, json_path: str):
         JOIN auctions a ON a.property_id = p.property_id
         WHERE a.status NOT IN ({placeholders})
           AND p.latitude IS NOT NULL AND p.longitude IS NOT NULL
+          AND p.last_seen_at >= ?
+          {dedup_exclusion}
         ORDER BY a.auction_datetime ASC
         """,
-        EXCLUDED_STATUSES,
-    ).fetchall()
+        EXCLUDED_STATUSES + (stale_cutoff,),
+        ).fetchall()
 
     properties = []
     for r in rows:
@@ -77,7 +103,7 @@ def export(db_path: str, json_path: str):
         # attach pdf links per property
         links = conn.execute(
             """SELECT l.url FROM auction_pdf_links l
-               JOIN auctions a ON a.auction_id = l.auction_id
+                                     JOIN auctions a ON a.auction_id = l.auction_id
                WHERE a.property_id = ?""",
             (row["property_id"],),
         ).fetchall()
@@ -110,6 +136,22 @@ def export(db_path: str, json_path: str):
         for r in missing_coords_rows
     ]
 
+    excluded_duplicates_count = conn.execute(
+        "SELECT COUNT(*) FROM property_duplicate_links"
+    ).fetchone()[0] if has_dedup_table else 0
+
+    stale_rows = conn.execute(
+        f"""SELECT p.address_raw, p.source, a.status, p.last_seen_at FROM auctions a
+            JOIN properties p ON p.property_id = a.property_id
+            WHERE a.status NOT IN ({placeholders}) AND p.last_seen_at < ?""",
+        EXCLUDED_STATUSES + (stale_cutoff,),
+        ).fetchall()
+    excluded_stale = [
+        {"address": r["address_raw"], "source": r["source"], "status": r["status"],
+         "last_seen_at": r["last_seen_at"]}
+        for r in stale_rows
+    ]
+
     meta = {
         "generated_at": conn.execute("SELECT datetime('now')").fetchone()[0],
         "count": len(properties),
@@ -118,6 +160,9 @@ def export(db_path: str, json_path: str):
         "excluded_by_status": excluded_by_status,
         "excluded_missing_coords_count": len(excluded_missing_coords),
         "excluded_missing_coords": excluded_missing_coords[:25],  # capped sample
+        "excluded_duplicates_count": excluded_duplicates_count,
+        "excluded_stale_count": len(excluded_stale),
+        "excluded_stale": excluded_stale[:25],  # capped sample
     }
 
     with open(json_path, "w") as f:
@@ -138,6 +183,14 @@ def export(db_path: str, json_path: str):
             print(f"  [{r['source']}] {r['address']!r} (status={r['status']!r})")
         if len(excluded_missing_coords) > 10:
             print(f"  ... and {len(excluded_missing_coords) - 10} more (see JSON meta for up to 25)")
+    if excluded_duplicates_count:
+        print(f"Excluded as cross-source duplicates: {excluded_duplicates_count} "
+              f"(run dedup_properties.py to recompute)")
+    if excluded_stale:
+        print(f"Excluded as stale (not re-confirmed in {STALE_AFTER_DAYS}+ days despite live status): "
+              f"{len(excluded_stale)}")
+        for r in excluded_stale[:10]:
+            print(f"  [{r['source']}] {r['address']!r} (last seen {r['last_seen_at']})")
 
     conn.close()
 
