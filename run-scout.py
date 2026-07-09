@@ -23,7 +23,9 @@ from spiders.brockscott import BrockScottSpider
 from spiders.jjmanning import JJManningSpider
 from spiders.towne import TowneAuctionSpider
 from spiders.patriot import PatriotSpider
-from base import DEFAULT_OVERRIDES_PATH, geocode_with_fallbacks
+from base import DEFAULT_OVERRIDES_PATH
+from geocode import reverse_geocode_geography, geocode_with_fallbacks
+
 
 # Spiders that are implemented and ready to run.
 REGISTRY = {
@@ -42,8 +44,8 @@ KNOWN_UNAVAILABLE = {}
 
 DEFAULT_OUT_PATH = "markers.csv"  # used when multiple spiders ran in one pass
 FIELDNAMES = [
-    "ID", "Name", "Latitude", "Longitude", "Source", "State", "County", "Timing",
-    "Property Type", "Bedrooms", "Bathrooms", "Sqft", "Lot Size", "Year Built",
+    "ID", "Name", "Latitude", "Longitude", "Source", "State", "County", "Municipality",
+    "Timing", "Property Type", "Bedrooms", "Bathrooms", "Sqft", "Lot Size", "Year Built",
     "Description", "Auction Date/Time", "Status", "PDF Links", "URL",
 ]
 
@@ -86,21 +88,8 @@ def resolve_spiders(names):
 # in a messier city name.
 STATE_RE = re.compile(r"\b([A-Z]{2})(?:\s+\d{5}(?:-\d{4})?)?\s*$")
 
-
-def extract_state(city_state):
-    """Pull just the 2-letter state code out of a city_state string, even
-    when a zip is glued on after it with no comma (e.g. 'Wakefield, MA
-    01880' -> 'MA', not 'MA 01880'). Falls back to the raw last-comma
-    segment if the pattern doesn't match, rather than returning nothing."""
-    if "," not in city_state:
-        return ""
-    last_segment = city_state.split(",")[-1].strip()
-    m = STATE_RE.search(last_segment)
-    return m.group(1) if m else last_segment
-
-
 def format_row(row):
-    state = extract_state(row["city_state"])
+
     return {
         # "{source}:{id}" mirrors the geocode_batch() key -- this is the
         # stable identifier a customer can quote back to us to debug a
@@ -111,13 +100,9 @@ def format_row(row):
         "Latitude": row["latitude"],
         "Longitude": row["longitude"],
         "Source": row["source"],
-        "State": state,
-        # County now comes through as its own field (see spiders/brockscott.py)
-        # rather than being parsed back out of a merged Description string --
-        # keep that pattern for any future spider: if a site's page has a
-        # field structured, carry it through structured, don't flatten it into
-        # free text and make some downstream step re-parse it.
+        "State": row.get("state", ""),
         "County": row.get("county", ""),
+        "Municipality": row.get("municipality", ""),
         "Timing": row.get("timing", "Unknown"),
         "Property Type": row.get("property_type", "") or "",
         "Bedrooms": row.get("bedrooms", "") or "",
@@ -186,6 +171,12 @@ def main():
         lat, lon = coords.get(key, (None, None))
         row["latitude"] = lat
         row["longitude"] = lon
+
+        if lat is not None and lon is not None:
+            geo = reverse_geocode_geography(lat, lon)
+            row["state"] = geo["state"]
+            row["county"] = geo["county"]
+            row["municipality"] = geo["municipality"]
 
     if still_unmatched:
         print(f"\n{len(still_unmatched)} address(es) could not be geocoded "

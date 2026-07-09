@@ -38,6 +38,7 @@ from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 from requests.utils import requote_uri
 
+
 DATE_CHUNK_RE = re.compile(
     r"[A-Za-z]{3,9}\.?\s+\d{1,2}(?:,\s*\d{4})?\s+at\s+\d{1,2}(?::\d{2})?\s*[ap]m",
     re.IGNORECASE,
@@ -99,39 +100,6 @@ def clean_url(url):
     return requote_uri(url)
 
 
-def geocode_batch(addresses):
-    """
-    Batch geocode via the free US Census Bureau geocoder.
-    addresses: list of (id, full_address_string)
-    Returns dict: id -> (lat, lon) or (None, None)
-    """
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    for aid, addr in addresses:
-        writer.writerow([aid, addr, "", "", ""])
-    payload = buf.getvalue()
-
-    files = {"addressFile": ("addresses.csv", payload, "text/csv")}
-    data = {"benchmark": "Public_AR_Current"}
-    resp = requests.post(
-        "https://geocoding.geo.census.gov/geocoder/locations/addressbatch",
-        files=files, data=data, timeout=60,
-    )
-    resp.raise_for_status()
-
-    results = {}
-    for line in resp.text.splitlines():
-        parts = next(csv.reader([line]))
-        rid = parts[0]
-        matched = parts[2] == "Match"
-        if matched:
-            lon, lat = parts[5].split(",")
-            results[rid] = (float(lat), float(lon))
-        else:
-            results[rid] = (None, None)
-    return results
-
-
 DEFAULT_OVERRIDES_PATH = "geocode_overrides.csv"
 
 NOMINATIM_USER_AGENT = "auction-scout/1.0 (research use; small nightly batch)"
@@ -170,98 +138,6 @@ def load_geocode_overrides(path=DEFAULT_OVERRIDES_PATH):
                 print(f"WARNING: {path}: skipping malformed override row for "
                       f"{rid!r} (latitude={lat_raw!r}, longitude={lon_raw!r})")
     return overrides
-
-
-def geocode_nominatim(address):
-    """
-    Single-address fallback geocode via OpenStreetMap Nominatim.
-
-    Only call this for the (usually small) leftover set after the Census
-    batch pass fails to match -- never as the primary geocoder. Two
-    reasons: Nominatim is one HTTP call per address (no batch endpoint) so
-    it's much slower at volume, and Census is the more authoritative
-    source for US addresses on the (large majority of) listings it does
-    match. Nominatim's usage policy caps free use at 1 request/second and
-    requires an identifying User-Agent -- both honored by the caller
-    (geocode_with_fallbacks applies the delay; the header is set here).
-
-    Returns (lat, lon) or (None, None) if no match / the request failed.
-    """
-    try:
-        resp = requests.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={"q": address, "format": "json", "limit": 1, "countrycodes": "us"},
-            headers={"User-Agent": NOMINATIM_USER_AGENT},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        results = resp.json()
-        if not results:
-            return None, None
-        return float(results[0]["lat"]), float(results[0]["lon"])
-    except (requests.RequestException, ValueError, KeyError, IndexError) as e:
-        print(f"  Nominatim failed for {address!r}: {type(e).__name__}: {e}")
-        return None, None
-
-
-def geocode_with_fallbacks(addresses, overrides_path=DEFAULT_OVERRIDES_PATH,
-                           nominatim_delay=1.1):
-    """
-    Resolve lat/lon for a list of (id, full_address_string) pairs using,
-    in order:
-      1. Manual overrides file -- always wins, never re-geocoded once a
-         human has looked something up. This is the fast path.
-      2. Census Bureau batch geocoder (geocode_batch) -- free, good
-         coverage for standard US addresses, and a single batched HTTP
-         call regardless of volume.
-      3. Nominatim, one address at a time -- slower and rate-limited, but
-         a genuinely different data source/algorithm, so it catches some
-         addresses Census can't match (new construction, unusual unit
-         formatting, etc).
-
-    Returns (results, still_unmatched):
-      - results: dict of id -> (lat, lon) for every input id (None, None)
-        if all three steps failed for that id.
-      - still_unmatched: list of (id, address) pairs that need a human to
-        look up and add to overrides_path.
-    """
-    overrides = load_geocode_overrides(overrides_path)
-
-    results = {}
-    remaining = []
-    for aid, addr in addresses:
-        if aid in overrides:
-            results[aid] = overrides[aid]
-        else:
-            remaining.append((aid, addr))
-
-    if overrides:
-        applied = sum(1 for aid, _ in addresses if aid in overrides)
-        if applied:
-            print(f"Applied {applied} manual geocode override(s) from {overrides_path}")
-
-    if remaining:
-        print(f"Geocoding {len(remaining)} address(es) via Census batch geocoder...")
-        census_results = geocode_batch(remaining)
-        for aid, addr in remaining:
-            results[aid] = census_results.get(aid, (None, None))
-
-    unmatched_after_census = [
-        (aid, addr) for aid, addr in remaining if results.get(aid) == (None, None)
-    ]
-
-    if unmatched_after_census:
-        print(f"Trying Nominatim fallback for {len(unmatched_after_census)} "
-              f"address(es) the Census geocoder couldn't match...")
-        for aid, addr in unmatched_after_census:
-            lat, lon = geocode_nominatim(addr)
-            results[aid] = (lat, lon)
-            time.sleep(nominatim_delay)  # Nominatim usage policy: max 1 req/sec
-
-    still_unmatched = [
-        (aid, addr) for aid, addr in addresses if results.get(aid) == (None, None)
-    ]
-    return results, still_unmatched
 
 
 class RobotsBlocked(Exception):
@@ -387,6 +263,7 @@ class AuctionSpider(ABC):
             row["auction_dt"], row["timing"] = parse_auction_date(row["date_time"])
 
             if self.scrape_details and row.get("url"):
+                
                 print(f"[{self.name}] ({i}/{total}) Scraping: {row['url']} "
                       f"-- {row.get('street', '')}, {row.get('city_state', '')}")
                 try:
