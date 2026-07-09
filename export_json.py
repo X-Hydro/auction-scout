@@ -1,5 +1,5 @@
 """
-Exports current property/auction state from SQLite into properties.json —
+Exports current property/auction state from SQLite into properties.json --
 the single static file the frontend map loads. Run this as the last step
 of the weekly automation, after load_csv.py has ingested the week's spider output.
 
@@ -7,12 +7,18 @@ Usage:
     python export_json.py auctionscout.db scout-properties.json
 
 Design notes:
-- One flat array, one object per property. No pagination — client does all filtering.
+- One flat array, one object per property. No pagination -- client does all filtering.
 - Statuses are treated as "live" (exported) by default. Only statuses explicitly
-  listed in EXCLUDED_STATUSES are dropped from the map — this is safer than a
+  listed in EXCLUDED_STATUSES are dropped from the map -- this is safer than a
   whitelist given real scraped data has varied status wording across six sources
   (e.g. "sold back to mortgagee" and "3rd party purchase" both mean the auction
   already concluded with a sale). Excluded properties remain in SQLite for history.
+- All live auctions are exported with status="scheduled" regardless of the raw
+  internal status (active/on_time/postponed/etc.). From a user perspective, if
+  it's on the map it's happening. Postponement history is surfaced via two
+  separate fields instead:
+    - times_postponed: count of date_change events for that auction (0 if never moved)
+    - original_date:   ISO8601 date from the first date_change event (null if never moved)
 - auction_datetime stays ISO8601 so the frontend can do its own date-bucket logic
   (This Week / This Month / All) relative to *today*, rather than trusting a
   stale precomputed bucket from scrape time.
@@ -40,7 +46,7 @@ EXCLUDED_STATUSES = (
 )
 
 # If a property hasn't been re-confirmed by a scrape within this many days,
-# treat it as no longer live regardless of its last recorded status — a
+# treat it as no longer live regardless of its last recorded status -- a
 # source may have quietly removed a listing without our ever seeing an
 # explicit status change (see load_csv.py's "disappeared" event detection).
 # Set generously above the expected weekly run cadence to tolerate a missed
@@ -60,7 +66,7 @@ def export(db_path: str, json_path: str):
         if has_dedup_table else ""
     )
     if not has_dedup_table:
-        print("Note: property_duplicate_links table not found — skipping duplicate "
+        print("Note: property_duplicate_links table not found -- skipping duplicate "
               "exclusion (run dedup_properties.py after updating schema.sql to enable it).")
 
     # ISO8601 timestamps compare correctly as plain strings, so this avoids
@@ -78,15 +84,26 @@ def export(db_path: str, json_path: str):
             p.longitude,
             p.state,
             p.county,
+            p.municipality,
             a.auction_datetime  AS auction_date,
-            a.status,
+            'scheduled'         AS status,
             a.property_type,
             a.bedrooms,
             a.bathrooms,
             a.sqft,
             a.lot_size_raw      AS lot_size,
             a.year_built,
-            a.source_url        AS url
+            a.source_url        AS url,
+            (SELECT COUNT(*)
+             FROM auction_events ae
+             WHERE ae.auction_id = a.auction_id
+               AND ae.event_type = 'date_change')  AS times_postponed,
+            (SELECT ae.old_value
+             FROM auction_events ae
+             WHERE ae.auction_id = a.auction_id
+               AND ae.event_type = 'date_change'
+             ORDER BY ae.event_id ASC
+             LIMIT 1)                               AS original_date
         FROM properties p
         JOIN auctions a ON a.property_id = p.property_id
         WHERE a.status NOT IN ({placeholders})
@@ -170,28 +187,30 @@ def export(db_path: str, json_path: str):
         json.dump(
             {**meta, "properties": properties},
             f,
-            indent=None,  # keep file size down; not meant to be hand-read
+            indent=2,  # keep file size down; not meant to be hand-read
         )
 
-    print(f"Exported {len(properties)} of {total_in_db} auctions to {json_path}")
+    print("Exported {} of {} auctions to {}".format(len(properties), total_in_db, json_path))
     if excluded_by_status:
         print("Excluded by status:")
         for status, cnt in sorted(excluded_by_status.items(), key=lambda x: -x[1]):
-            print(f"  {status!r}: {cnt}")
+            print("  {!r}: {}".format(status, cnt))
     if excluded_missing_coords:
-        print(f"Excluded for missing coordinates (live status, no lat/lon): {len(excluded_missing_coords)}")
+        print("Excluded for missing coordinates (live status, no lat/lon): {}".format(
+            len(excluded_missing_coords)))
         for r in excluded_missing_coords[:10]:
-            print(f"  [{r['source']}] {r['address']!r} (status={r['status']!r})")
+            print("  [{}] {!r} (status={!r})".format(r["source"], r["address"], r["status"]))
         if len(excluded_missing_coords) > 10:
-            print(f"  ... and {len(excluded_missing_coords) - 10} more (see JSON meta for up to 25)")
+            print("  ... and {} more (see JSON meta for up to 25)".format(
+                len(excluded_missing_coords) - 10))
     if excluded_duplicates_count:
-        print(f"Excluded as cross-source duplicates: {excluded_duplicates_count} "
-              f"(run dedup_properties.py to recompute)")
+        print("Excluded as cross-source duplicates: {} "
+              "(run dedup_properties.py to recompute)".format(excluded_duplicates_count))
     if excluded_stale:
-        print(f"Excluded as stale (not re-confirmed in {STALE_AFTER_DAYS}+ days despite live status): "
-              f"{len(excluded_stale)}")
+        print("Excluded as stale (not re-confirmed in {}+ days despite live status): {}".format(
+            STALE_AFTER_DAYS, len(excluded_stale)))
         for r in excluded_stale[:10]:
-            print(f"  [{r['source']}] {r['address']!r} (last seen {r['last_seen_at']})")
+            print("  [{}] {!r} (last seen {})".format(r["source"], r["address"], r["last_seen_at"]))
 
     conn.close()
 

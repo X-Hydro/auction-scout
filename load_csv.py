@@ -95,7 +95,9 @@ def parse_auction_datetime(raw: str):
 
 # Description field looks like:
 # "Single Family Home | Property Type: Residential; Mortgage Ref: ...; Lot Size: 4.32 acres;
-#  Square Feet: 4,268 sf; # Bedrooms: 4; # Baths: 2; Year Built: 1981; County: Norfolk"
+#  Square Feet: 4,268 sf; # Bedrooms: 4; # Baths: 2; Year Built: 1981"
+# (County comes from the CSV's own County column — reverse-geocoded alongside
+#  State and Municipality — not from this free-text field.)
 FIELD_PATTERNS = {
     "property_type": r"Property Type:\s*([^;]+)",
     "mortgage_ref": r"Mortgage Ref:\s*([^;]+)",
@@ -103,7 +105,6 @@ FIELD_PATTERNS = {
     "sqft": r"Square Feet:\s*([\d,]+)",
     "bedrooms": r"#\s*Bedrooms:\s*(\d+)",
     "year_built": r"Year Built:\s*(\d{4})",
-    "county": r"County:\s*([^;]+)",
 }
 # Baths is messier ("2" or "3 full / 2 half") — capture raw, coerce to float where simple
 BATH_PATTERN = r"#\s*Baths:\s*([^;]+)"
@@ -113,7 +114,7 @@ def parse_description(desc: str) -> dict:
     out = {
         "property_type": None, "mortgage_ref": None, "lot_size_raw": None,
         "sqft": None, "bedrooms": None, "bathrooms": None,
-        "year_built": None, "county": None,
+        "year_built": None,
     }
     if not desc:
         return out
@@ -288,6 +289,10 @@ def load(csv_path: str, db_path: str):
                 auction_dt = parse_auction_datetime(row["Auction Date/Time"])
                 status = row["Status"].strip().lower()
 
+                state = (row.get("State") or "").strip()
+                county = (row.get("County") or "").strip()
+                municipality = (row.get("Municipality") or "").strip()
+
                 # --- upsert property ---
                 cur.execute(
                     "SELECT property_id FROM properties WHERE source=? AND source_listing_id=?",
@@ -297,17 +302,19 @@ def load(csv_path: str, db_path: str):
                 if existing:
                     property_id = existing[0]
                     cur.execute(
-                        "UPDATE properties SET last_seen_at=? WHERE property_id=?",
-                        (ts, property_id),
+                        """UPDATE properties SET last_seen_at=?, state=?, county=?, municipality=?
+                           WHERE property_id=?""",
+                        (ts, state, county, municipality, property_id),
                     )
                 else:
                     cur.execute(
                         """INSERT INTO properties
                            (source, source_listing_id, address_raw, latitude, longitude,
-                            state, county, first_seen_at, last_seen_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            state, county, municipality, first_seen_at, last_seen_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (row["Source"], listing_id, row["Name"], float(row["Latitude"]),
-                         float(row["Longitude"]), row["State"], parsed_desc["county"], ts, ts),
+                         float(row["Longitude"]), state, county,
+                         municipality, ts, ts),
                     )
                     property_id = cur.lastrowid
                     records_new += 1

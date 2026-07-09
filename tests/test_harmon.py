@@ -234,7 +234,7 @@ class TestParseDeposit:
 
 # ---- _discover_upper_bound: probe logic --------------------------------
 
-def _hit_soup()
+def _hit_soup():
     return _soup('<div class="blockAuction"><h1>Auction</h1></div>')
 
 
