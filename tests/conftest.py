@@ -4,17 +4,27 @@ conftest.py — shared pytest fixtures for the AuctionScout pipeline tests.
 Makes load_csv.py, export_json.py, and dedup_properties.py importable as
 modules even though they're designed to also be run standalone as scripts —
 pytest needs the parent directory on sys.path to find them.
+
+Also puts spiders/ on sys.path, so spider test modules (e.g.
+test_brockscott.py) can do `from brockscott import ...` the same way
+run-scout.py's own sys.path.insert(0, .../spiders) lets it do
+`from spiders.brockscott import BrockScottSpider`.
 """
 
 import os
 import sqlite3
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SPIDERS_DIR = os.path.join(ROOT, "spiders")
+
+for _path in (ROOT, SPIDERS_DIR):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 import pytest
 
-SCHEMA_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "schema.sql")
+SCHEMA_PATH = os.path.join(ROOT, "schema.sql")
 
 
 

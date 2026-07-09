@@ -10,6 +10,7 @@ Usage:
 
 import argparse
 import csv
+import re
 import sys
 from pathlib import Path
 
@@ -41,7 +42,8 @@ KNOWN_UNAVAILABLE = {}
 
 DEFAULT_OUT_PATH = "markers.csv"  # used when multiple spiders ran in one pass
 FIELDNAMES = [
-    "Name", "Latitude", "Longitude", "Source", "State", "Timing",
+    "ID", "Name", "Latitude", "Longitude", "Source", "State", "County", "Timing",
+    "Property Type", "Bedrooms", "Bathrooms", "Sqft", "Lot Size", "Year Built",
     "Description", "Auction Date/Time", "Status", "PDF Links", "URL",
 ]
 
@@ -77,16 +79,56 @@ def resolve_spiders(names):
     return spider_classes
 
 
+# Matches a 2-letter state abbreviation, optionally followed by a zip
+# (5-digit or ZIP+4). Anchored to the end of the string since city_state's
+# last comma segment is "STATE" or "STATE ZIP" (e.g. "MA" or "MA 01880") --
+# never anchoring to start avoids false-matching 2-letter fragments earlier
+# in a messier city name.
+STATE_RE = re.compile(r"\b([A-Z]{2})(?:\s+\d{5}(?:-\d{4})?)?\s*$")
+
+
+def extract_state(city_state):
+    """Pull just the 2-letter state code out of a city_state string, even
+    when a zip is glued on after it with no comma (e.g. 'Wakefield, MA
+    01880' -> 'MA', not 'MA 01880'). Falls back to the raw last-comma
+    segment if the pattern doesn't match, rather than returning nothing."""
+    if "," not in city_state:
+        return ""
+    last_segment = city_state.split(",")[-1].strip()
+    m = STATE_RE.search(last_segment)
+    return m.group(1) if m else last_segment
+
+
 def format_row(row):
-    state = row["city_state"].split(",")[-1].strip() if "," in row["city_state"] else ""
+    state = extract_state(row["city_state"])
     return {
+        # "{source}:{id}" mirrors the geocode_batch() key -- this is the
+        # stable identifier a customer can quote back to us to debug a
+        # specific listing, and (once a diff/report step exists) the join
+        # key for detecting new/changed/removed auctions run over run.
+        "ID": f"{row.get('source', '')}:{row.get('id', '')}",
         "Name": f"{row['street']}, {row['city_state']}",
         "Latitude": row["latitude"],
         "Longitude": row["longitude"],
         "Source": row["source"],
         "State": state,
+        # County now comes through as its own field (see spiders/brockscott.py)
+        # rather than being parsed back out of a merged Description string --
+        # keep that pattern for any future spider: if a site's page has a
+        # field structured, carry it through structured, don't flatten it into
+        # free text and make some downstream step re-parse it.
+        "County": row.get("county", ""),
         "Timing": row.get("timing", "Unknown"),
-        "Description": f"{row.get('description', '')} | {row.get('extra_fields', '')}",
+        "Property Type": row.get("property_type", "") or "",
+        "Bedrooms": row.get("bedrooms", "") or "",
+        "Bathrooms": row.get("bathrooms", "") or "",
+        "Sqft": row.get("sqft", "") or "",
+        "Lot Size": row.get("lot_size", "") or "",
+        "Year Built": row.get("year_built", "") or "",
+        # Free-text only now -- case #, court SP #, opening bid, book page,
+        # and anything else that doesn't have (or doesn't yet have) its own
+        # structured column.
+        "Description": row.get("extra_fields", ""),
         "Auction Date/Time": row["date_time"],
         "Status": row["status"],
         "PDF Links": row.get("pdf_links", ""),

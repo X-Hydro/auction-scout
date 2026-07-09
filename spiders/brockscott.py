@@ -26,6 +26,13 @@ Book Page). No separate detail page exists or is needed.
 Pagination: follow the link in div.pagination whose text is "Next >" (the
 containing div is misleadingly classed "nav-previous" -- a template quirk,
 matched here by link text, not class, to avoid relying on that).
+
+NOTE ON DATA COMPLETENESS: this source's listing page only ever exposes the
+seven .forecol fields above. There is no property type, bed/bath count,
+square footage, lot size, or year-built anywhere on the page or in a detail
+page (there is no detail page -- scrape_details = False). Those fields are
+structurally unavailable from Brock & Scott and will always be None for
+this spider; that's not a parsing bug to chase.
 """
 
 import re
@@ -159,7 +166,16 @@ class BrockScottSpider(AuctionSpider):
         date_time_raw = fields.get("Sale Date", "")
         auction_dt, timing = _parse_sale_date(date_time_raw)
 
+        # County is its own field -- return it clean, not smashed together
+        # with case/bid/book-page details. Those go in extra_fields instead,
+        # which is display-only metadata and must never be parsed back into
+        # a structured column downstream.
+        county = fields.get("County", "").strip()
         case_number = fields.get("Case #", "").strip()
+        court_sp_number = fields.get("Court SP #", "").strip()
+        opening_bid = fields.get("Opening Bid Amount", "").strip()
+        book_page = fields.get("Book Page", "").strip()
+
         if case_number:
             # Confirmed via manual curl test: ?_sfm_casenumber=... genuinely
             # filters to the single matching listing (unlike the
@@ -169,14 +185,11 @@ class BrockScottSpider(AuctionSpider):
         else:
             detail_url = listing_url  # no case number to filter by -- fall back
 
-        description_parts = [
-            f"County: {fields['County']}" if fields.get("County") else "",
-            f"Case #: {fields['Case #']}" if fields.get("Case #") else "",
-            f"Court SP #: {fields['Court SP #']}" if fields.get("Court SP #") else "",
-        ]
         extra_parts = [
-            f"Opening Bid: {fields['Opening Bid Amount']}" if fields.get("Opening Bid Amount") else "",
-            f"Book Page: {fields['Book Page']}" if fields.get("Book Page") else "",
+            f"Case #: {case_number}" if case_number else "",
+            f"Court SP #: {court_sp_number}" if court_sp_number else "",
+            f"Opening Bid: {opening_bid}" if opening_bid else "",
+            f"Book Page: {book_page}" if book_page else "",
         ]
 
         return {
@@ -188,7 +201,19 @@ class BrockScottSpider(AuctionSpider):
             "status": "active",  # site has no cancelled/postponed field to key off
             "street": street,
             "city_state": city_state,
-            "description": " | ".join(p for p in description_parts if p),
+            "county": county,
+            "case_number": case_number,
+            "opening_bid": opening_bid,
+            "book_page": book_page,
+            "description": county,  # kept for any code still reading .description as a summary field
             "extra_fields": " | ".join(p for p in extra_parts if p),
             "pdf_links": "",
+            # Structurally unavailable from this source -- explicit None,
+            # not a parsing gap. See module docstring.
+            "property_type": None,
+            "bedrooms": None,
+            "bathrooms": None,
+            "sqft": None,
+            "lot_size": None,
+            "year_built": None,
         }
