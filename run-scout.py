@@ -23,7 +23,7 @@ from spiders.brockscott import BrockScottSpider
 from spiders.jjmanning import JJManningSpider
 from spiders.towne import TowneAuctionSpider
 from spiders.patriot import PatriotSpider
-from base import geocode_batch
+from base import DEFAULT_OVERRIDES_PATH, geocode_with_fallbacks
 
 # Spiders that are implemented and ready to run.
 REGISTRY = {
@@ -179,7 +179,7 @@ def main():
         (f"{r['source']}:{r['id']}", f"{r['street']}, {r['city_state']}")
         for r in all_rows if r.get("id")
     ]
-    coords = geocode_batch(address_pairs)
+    coords, still_unmatched = geocode_with_fallbacks(address_pairs)
 
     for row in all_rows:
         key = f"{row['source']}:{row['id']}"
@@ -187,11 +187,20 @@ def main():
         row["latitude"] = lat
         row["longitude"] = lon
 
-    unmatched = [r for r in all_rows if r["latitude"] is None]
-    if unmatched:
-        print(f"Warning: {len(unmatched)} address(es) failed to geocode:")
-        for r in unmatched:
-            print(f"  - [{r['source']}] {r['street']}, {r['city_state']}")
+    if still_unmatched:
+        print(f"\n{len(still_unmatched)} address(es) could not be geocoded "
+              f"automatically (Census + Nominatim both failed):")
+        for aid, addr in still_unmatched:
+            print(f"  - [{aid}] {addr}")
+        print(f"\nTo fix: look up coordinates manually (e.g. Google Maps -- "
+              f"right-click the pin, click the lat/lon to copy it), then add "
+              f"a row to {DEFAULT_OVERRIDES_PATH} (create it with this header "
+              f"if it doesn't exist yet: id,latitude,longitude,address,note). "
+              f"Ready-to-fill lines for the addresses above:")
+        print("  id,latitude,longitude,address,note")
+        for aid, addr in still_unmatched:
+            print(f'  {aid},,,"{addr}",')
+        print(f"Next run will pick these up automatically once filled in.")
 
     if len(spider_classes) == 1:
         out_path = f"{spider_classes[0].name}.csv"

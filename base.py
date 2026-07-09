@@ -30,6 +30,7 @@ import time
 import urllib.robotparser
 from abc import ABC, abstractmethod
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -129,6 +130,138 @@ def geocode_batch(addresses):
         else:
             results[rid] = (None, None)
     return results
+
+
+DEFAULT_OVERRIDES_PATH = "geocode_overrides.csv"
+
+NOMINATIM_USER_AGENT = "auction-scout/1.0 (research use; small nightly batch)"
+
+
+def load_geocode_overrides(path=DEFAULT_OVERRIDES_PATH):
+    """
+    Load manually-verified lat/lon corrections, keyed by "source:id" (same
+    key format geocode_batch/geocode_with_fallbacks use everywhere else).
+
+    File format (CSV, header required):
+        id,latitude,longitude,address,note
+
+    Only id/latitude/longitude are read programmatically -- address/note
+    are there purely so a human looking at the file later can tell which
+    listing a row is for without decoding the id. A missing file just
+    means no overrides exist yet, not an error -- this always returns a
+    dict, empty or not.
+    """
+    overrides = {}
+    p = Path(path)
+    if not p.exists():
+        return overrides
+
+    with open(p, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rid = (row.get("id") or "").strip()
+            lat_raw = (row.get("latitude") or "").strip()
+            lon_raw = (row.get("longitude") or "").strip()
+            if not rid or not lat_raw or not lon_raw:
+                continue
+            try:
+                overrides[rid] = (float(lat_raw), float(lon_raw))
+            except ValueError:
+                print(f"WARNING: {path}: skipping malformed override row for "
+                      f"{rid!r} (latitude={lat_raw!r}, longitude={lon_raw!r})")
+    return overrides
+
+
+def geocode_nominatim(address):
+    """
+    Single-address fallback geocode via OpenStreetMap Nominatim.
+
+    Only call this for the (usually small) leftover set after the Census
+    batch pass fails to match -- never as the primary geocoder. Two
+    reasons: Nominatim is one HTTP call per address (no batch endpoint) so
+    it's much slower at volume, and Census is the more authoritative
+    source for US addresses on the (large majority of) listings it does
+    match. Nominatim's usage policy caps free use at 1 request/second and
+    requires an identifying User-Agent -- both honored by the caller
+    (geocode_with_fallbacks applies the delay; the header is set here).
+
+    Returns (lat, lon) or (None, None) if no match / the request failed.
+    """
+    try:
+        resp = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": address, "format": "json", "limit": 1, "countrycodes": "us"},
+            headers={"User-Agent": NOMINATIM_USER_AGENT},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        results = resp.json()
+        if not results:
+            return None, None
+        return float(results[0]["lat"]), float(results[0]["lon"])
+    except (requests.RequestException, ValueError, KeyError, IndexError) as e:
+        print(f"  Nominatim failed for {address!r}: {type(e).__name__}: {e}")
+        return None, None
+
+
+def geocode_with_fallbacks(addresses, overrides_path=DEFAULT_OVERRIDES_PATH,
+                           nominatim_delay=1.1):
+    """
+    Resolve lat/lon for a list of (id, full_address_string) pairs using,
+    in order:
+      1. Manual overrides file -- always wins, never re-geocoded once a
+         human has looked something up. This is the fast path.
+      2. Census Bureau batch geocoder (geocode_batch) -- free, good
+         coverage for standard US addresses, and a single batched HTTP
+         call regardless of volume.
+      3. Nominatim, one address at a time -- slower and rate-limited, but
+         a genuinely different data source/algorithm, so it catches some
+         addresses Census can't match (new construction, unusual unit
+         formatting, etc).
+
+    Returns (results, still_unmatched):
+      - results: dict of id -> (lat, lon) for every input id (None, None)
+        if all three steps failed for that id.
+      - still_unmatched: list of (id, address) pairs that need a human to
+        look up and add to overrides_path.
+    """
+    overrides = load_geocode_overrides(overrides_path)
+
+    results = {}
+    remaining = []
+    for aid, addr in addresses:
+        if aid in overrides:
+            results[aid] = overrides[aid]
+        else:
+            remaining.append((aid, addr))
+
+    if overrides:
+        applied = sum(1 for aid, _ in addresses if aid in overrides)
+        if applied:
+            print(f"Applied {applied} manual geocode override(s) from {overrides_path}")
+
+    if remaining:
+        print(f"Geocoding {len(remaining)} address(es) via Census batch geocoder...")
+        census_results = geocode_batch(remaining)
+        for aid, addr in remaining:
+            results[aid] = census_results.get(aid, (None, None))
+
+    unmatched_after_census = [
+        (aid, addr) for aid, addr in remaining if results.get(aid) == (None, None)
+    ]
+
+    if unmatched_after_census:
+        print(f"Trying Nominatim fallback for {len(unmatched_after_census)} "
+              f"address(es) the Census geocoder couldn't match...")
+        for aid, addr in unmatched_after_census:
+            lat, lon = geocode_nominatim(addr)
+            results[aid] = (lat, lon)
+            time.sleep(nominatim_delay)  # Nominatim usage policy: max 1 req/sec
+
+    still_unmatched = [
+        (aid, addr) for aid, addr in addresses if results.get(aid) == (None, None)
+    ]
+    return results, still_unmatched
 
 
 class RobotsBlocked(Exception):
