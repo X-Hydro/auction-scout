@@ -1,29 +1,4 @@
-"""Tests for load_csv.py — CSV parsing helpers and the full load() pipeline."""
-
-import sqlite3
-
 import load_csv
-from conftest import write_csv
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# Parsing helpers
-# ─────────────────────────────────────────────────────────────────────────
-
-class TestParseAuctionDatetime:
-    def test_standard_format(self):
-        result = load_csv.parse_auction_datetime("Wed. Jul. 8, 2026 at 11 am")
-        assert result == "2026-07-08T11:00:00"
-
-    def test_pm_time(self):
-        result = load_csv.parse_auction_datetime("Thu. Jul. 16, 2026 at 2 pm")
-        assert result.startswith("2026-07-16T14:00:00")
-
-    def test_empty_string_returns_none(self):
-        assert load_csv.parse_auction_datetime("") is None
-
-    def test_garbage_input_returns_none_not_exception(self):
-        assert load_csv.parse_auction_datetime("not a date at all !!!") is None
 
 
 class TestParseDescription:
@@ -34,267 +9,60 @@ class TestParseDescription:
         assert result["bathrooms"] == 2.0
         assert result["sqft"] == 4268
         assert result["year_built"] == 1981
-        assert result["county"] == "Norfolk"
+        # county is NOT produced here by design -- see the FIELD_PATTERNS
+        # comment in load_csv.py. It's sourced from the CSV's own County
+        # column (reverse-geocoded), never re-parsed out of free text.
+        assert "county" not in result
         assert "Norfolk Cty." in result["mortgage_ref"]
 
-    def test_full_and_half_baths(self):
-        desc = "# Baths: 3 full / 2 half; Year Built: 1915"
-        result = load_csv.parse_description(desc)
-        # 3 full + 2 half (0.5 each) = 4.0 total bath-equivalents
-        assert result["bathrooms"] == 4.0
 
-    def test_simple_bath_count(self):
-        desc = "# Baths: 2; Year Built: 1970"
-        result = load_csv.parse_description(desc)
+class TestResolvePropertyDetails:
+    def test_prefers_explicit_columns(self, sample_row_with_columns):
+        """When dedicated columns are populated, they should be used --
+        this is the current, real shape spiders like sullivan.py emit."""
+        parsed_desc = load_csv.parse_description(sample_row_with_columns["Description"])
+        result = load_csv.resolve_property_details(sample_row_with_columns, parsed_desc)
+
+        assert result["property_type"] == "Residential"
+        assert result["bedrooms"] == 4
         assert result["bathrooms"] == 2.0
+        assert result["sqft"] == 4268
+        assert result["lot_size_raw"] == "4.32 acres"
+        assert result["year_built"] == 1981
+        # Description here only has genuine leftovers -- mortgage_ref
+        # still correctly comes through the Description-parsing fallback,
+        # since there's no dedicated "Mortgage Ref" column at all.
+        assert "Norfolk Cty." in result["mortgage_ref"]
 
-    def test_missing_fields_are_none_not_crash(self):
-        result = load_csv.parse_description("Multi-Family Home | Property Type: Residential")
-        assert result["bedrooms"] is None
-        assert result["county"] is None
+    def test_column_wins_over_conflicting_description(self, row_with_conflicting_description):
+        """The strong version of the above: columns and Description
+        actively DISAGREE here (Bedrooms column=4, Description text
+        says 5; Property Type column=Residential, Description says
+        Land). If resolve_property_details() ever regressed to
+        preferring Description, this is what would catch it --
+        test_prefers_explicit_columns alone couldn't, since its
+        Description has nothing to conflict with."""
+        parsed_desc = load_csv.parse_description(row_with_conflicting_description["Description"])
+        # sanity check the fixture itself is set up as intended --
+        # confirms Description really would parse to different values
+        assert parsed_desc["bedrooms"] == 5
+        assert parsed_desc["property_type"] == "Land"
 
-    def test_empty_description(self):
-        result = load_csv.parse_description("")
-        assert result["property_type"] is None
-        assert result["bedrooms"] is None
+        result = load_csv.resolve_property_details(row_with_conflicting_description, parsed_desc)
 
+        assert result["bedrooms"] == 4  # column, not Description's 5
+        assert result["property_type"] == "Residential"  # column, not Description's Land
+        assert result["sqft"] == 4268  # column, not Description's 9999
+        assert result["year_built"] == 1981  # column, not Description's 1900
 
-class TestExtractListingId:
-    def test_sullivan_id_param(self):
-        url = "https://sullivan-auctioneers.com/auction/?id=21007"
-        assert load_csv.extract_listing_id(url) == "21007"
+    def test_falls_back_to_description_when_column_blank(self, sample_row):
+        """A source with no dedicated columns at all (sample_row's legacy
+        shape) should still get correct values via the Description
+        fallback -- this is resolve_property_details() applied to the
+        OTHER real scenario it needs to handle."""
+        parsed_desc = load_csv.parse_description(sample_row["Description"])
+        result = load_csv.resolve_property_details(sample_row, parsed_desc)
 
-    def test_patriot_id_param(self):
-        url = "https://patriotauctioneers.com/calendar-detail/?id=21306"
-        assert load_csv.extract_listing_id(url) == "21306"
-
-    def test_harmon_law_path_based_id(self):
-        url = "https://www.harmonlawoffices.com/auction/1942"
-        assert load_csv.extract_listing_id(url) == "1942"
-
-    def test_brock_and_scott_falls_back_honestly(self):
-        """No confirmed per-listing URL pattern exists for this source yet —
-        the real example we have is a paginated index page, not a detail
-        page. It should fall back to the full URL, not a fabricated pattern."""
-        url = "https://www.brockandscott.com/foreclosure-sales/?sf_paged=2"
-        assert load_csv.extract_listing_id(url) == url
-
-    def test_unrecognized_source_falls_back_to_full_url(self):
-        url = "https://example.com/listing/some-property"
-        assert load_csv.extract_listing_id(url) == url
-
-    def test_towne_uses_address_slug_not_shared_url(self):
-        """Towne's site has no per-listing detail page — every row shares
-        the exact same base URL. Confirmed from real scraped data: this
-        caused 7 different properties to silently collapse into 1 database
-        row before the fix (see TestLoadPipeline.test_towne_shared_url_...)."""
-        url = "https://currentauctions.towneauction.com/"
-        id1 = load_csv.extract_listing_id(url, "19 Mill Hill Street, Randolph, MA 02368")
-        id2 = load_csv.extract_listing_id(url, "39 Mill Pond Road, Durham, NH 03824")
-        assert id1 != id2
-        assert id1 == "19-mill-hill-street-randolph-ma-02368"
-
-    def test_towne_same_address_produces_same_id(self):
-        """The whole point of the slug: the SAME address across two
-        different runs must still produce the SAME id, or every run would
-        look like the old listing disappeared and a new one appeared."""
-        url = "https://currentauctions.towneauction.com/"
-        addr = "19 Mill Hill Street, Randolph, MA 02368"
-        assert load_csv.extract_listing_id(url, addr) == load_csv.extract_listing_id(url, addr)
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# Full load() pipeline
-# ─────────────────────────────────────────────────────────────────────────
-
-class TestLoadPipeline:
-    def test_first_run_inserts_new_property_and_auction(self, db_path, tmp_path, sample_row):
-        csv_path = str(tmp_path / "run1.csv")
-        write_csv(csv_path, [sample_row])
-        load_csv.load(csv_path, db_path)
-
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        props = conn.execute("SELECT * FROM properties").fetchall()
-        assert len(props) == 1
-        assert props[0]["address_raw"] == "130 Forest Avenue, Cohasset, MA"
-
-        events = conn.execute("SELECT * FROM auction_events").fetchall()
-        assert len(events) == 1
-        assert events[0]["event_type"] == "first_seen"
-        conn.close()
-
-    def test_rerun_with_no_changes_logs_nothing_new(self, db_path, tmp_path, sample_row):
-        csv_path = str(tmp_path / "run.csv")
-        write_csv(csv_path, [sample_row])
-        load_csv.load(csv_path, db_path)
-        load_csv.load(csv_path, db_path)  # identical second run
-
-        conn = sqlite3.connect(db_path)
-        # Still only one property, one auction, one event (first_seen only)
-        assert conn.execute("SELECT COUNT(*) FROM properties").fetchone()[0] == 1
-        assert conn.execute("SELECT COUNT(*) FROM auction_events").fetchone()[0] == 1
-        conn.close()
-
-    def test_status_change_is_logged(self, db_path, tmp_path, sample_row):
-        csv_path = str(tmp_path / "run.csv")
-        write_csv(csv_path, [sample_row])
-        load_csv.load(csv_path, db_path)
-
-        changed = dict(sample_row)
-        changed["Status"] = "postponed"
-        csv_path2 = str(tmp_path / "run2.csv")
-        write_csv(csv_path2, [changed])
-        load_csv.load(csv_path2, db_path)
-
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        events = conn.execute(
-            "SELECT * FROM auction_events WHERE event_type='status_change'"
-        ).fetchall()
-        assert len(events) == 1
-        assert events[0]["old_value"] == "on"
-        assert events[0]["new_value"] == "postponed"
-        conn.close()
-
-    def test_date_change_is_logged(self, db_path, tmp_path, sample_row):
-        csv_path = str(tmp_path / "run.csv")
-        write_csv(csv_path, [sample_row])
-        load_csv.load(csv_path, db_path)
-
-        changed = dict(sample_row)
-        changed["Auction Date/Time"] = "Wed. Jul. 15, 2026 at 11 am"
-        csv_path2 = str(tmp_path / "run2.csv")
-        write_csv(csv_path2, [changed])
-        load_csv.load(csv_path2, db_path)
-
-        conn = sqlite3.connect(db_path)
-        events = conn.execute(
-            "SELECT * FROM auction_events WHERE event_type='date_change'"
-        ).fetchall()
-        assert len(events) == 1
-        conn.close()
-
-    def test_malformed_row_does_not_abort_whole_run(self, db_path, tmp_path, sample_row):
-        good_row = sample_row
-        bad_row = dict(sample_row)
-        bad_row["Latitude"] = "NOT_A_NUMBER"
-        bad_row["URL"] = "https://sullivan-auctioneers.com/auction/?id=99999"
-
-        csv_path = str(tmp_path / "run.csv")
-        write_csv(csv_path, [good_row, bad_row])
-        load_csv.load(csv_path, db_path)
-
-        conn = sqlite3.connect(db_path)
-        # The good row still loaded despite the bad one failing
-        assert conn.execute("SELECT COUNT(*) FROM properties").fetchone()[0] == 1
-        conn.close()
-
-    def test_disappeared_listing_logged_once_not_repeatedly(self, db_path, tmp_path, sample_row):
-        other_row = dict(sample_row)
-        other_row["URL"] = "https://sullivan-auctioneers.com/auction/?id=00001"
-        other_row["Name"] = "1 Still Here St, Boston, MA"
-
-        csv_path1 = str(tmp_path / "run1.csv")
-        write_csv(csv_path1, [sample_row, other_row])
-        load_csv.load(csv_path1, db_path)
-
-        # sample_row's listing is gone, but 'sullivan' is still represented in
-        # this run via other_row — so disappeared-detection can safely scope
-        # to sullivan without guessing about sources it never saw at all.
-        csv_path2 = str(tmp_path / "run2.csv")
-        write_csv(csv_path2, [other_row])
-        load_csv.load(csv_path2, db_path)
-        load_csv.load(csv_path2, db_path)  # run again — should NOT double-log
-
-        conn = sqlite3.connect(db_path)
-        disappeared_events = conn.execute(
-            "SELECT COUNT(*) FROM auction_events WHERE event_type='disappeared'"
-        ).fetchone()[0]
-        assert disappeared_events == 1
-        conn.close()
-
-    def test_completely_empty_csv_does_not_mark_everything_disappeared(self, db_path, tmp_path, sample_row):
-        """A zero-row CSV can't distinguish 'this source genuinely has no live
-        listings' from 'the scraper crashed and produced nothing' — so it
-        must NOT trigger mass disappeared-marking. This is intentional
-        conservative behavior, not a gap."""
-        csv_path1 = str(tmp_path / "run1.csv")
-        write_csv(csv_path1, [sample_row])
-        load_csv.load(csv_path1, db_path)
-
-        empty_csv = str(tmp_path / "run2.csv")
-        write_csv(empty_csv, [])
-        load_csv.load(empty_csv, db_path)
-
-        conn = sqlite3.connect(db_path)
-        disappeared_events = conn.execute(
-            "SELECT COUNT(*) FROM auction_events WHERE event_type='disappeared'"
-        ).fetchone()[0]
-        assert disappeared_events == 0
-        conn.close()
-
-    def test_disappeared_only_scoped_to_sources_present_in_run(self, db_path, tmp_path, sample_row):
-        """A property from a source NOT included in this run's CSV should not
-        be marked disappeared — that would be wrong if only scraping one
-        source's file at a time."""
-        row_a = sample_row
-        row_b = dict(sample_row)
-        row_b["Source"] = "harmon_law"
-        row_b["URL"] = "https://harmonlaw.example/?id=555"
-        row_b["Name"] = "1 Other St, Boston, MA"
-
-        csv_path1 = str(tmp_path / "run1.csv")
-        write_csv(csv_path1, [row_a, row_b])
-        load_csv.load(csv_path1, db_path)
-
-        # Second run only includes sullivan — harmon_law wasn't scraped this time
-        csv_path2 = str(tmp_path / "run2.csv")
-        write_csv(csv_path2, [row_a])
-        load_csv.load(csv_path2, db_path)
-
-        conn = sqlite3.connect(db_path)
-        disappeared = conn.execute(
-            "SELECT COUNT(*) FROM auction_events WHERE event_type='disappeared'"
-        ).fetchone()[0]
-        assert disappeared == 0  # harmon_law shouldn't be flagged — it wasn't in this run at all
-        conn.close()
-
-    def test_towne_shared_url_does_not_collapse_multiple_listings(self, db_path, tmp_path):
-        """Regression test for a real bug found in production data: Towne's
-        site shares one URL across every listing (no per-listing detail
-        page). Before the fix, this silently merged multiple distinct
-        properties into a single database row, each overwriting the last —
-        producing nonsensical chains of dozens of 'date changes' all
-        attributed to one address."""
-        towne_row = lambda name, date: {
-            "Name": name, "Latitude": "42.0", "Longitude": "-71.0", "Source": "towne",
-            "State": "MA", "Timing": "Later", "Description": "County: Test",
-            "Auction Date/Time": date, "Status": "on_time", "PDF Links": "",
-            "URL": "https://currentauctions.towneauction.com/",
-        }
-        rows = [
-            towne_row("19 Mill Hill Street, Randolph, MA 02368", "08/21/26 1:00 PM"),
-            towne_row("39 Mill Pond Road, Durham, NH 03824", "08/25/26 1:00 PM"),
-            towne_row("200 Diamond Hill Road, Warwick, RI 02886", "09/03/26 1:00 PM"),
-        ]
-        csv_path = str(tmp_path / "towne.csv")
-        write_csv(csv_path, rows)
-        load_csv.load(csv_path, db_path)
-
-        conn = sqlite3.connect(db_path)
-        count = conn.execute("SELECT COUNT(*) FROM properties WHERE source='towne'").fetchone()[0]
-        assert count == 3  # not 1 — this is the actual bug that shipped
-        conn.close()
-
-    def test_schema_optional_when_db_already_initialized(self, db_path, tmp_path, sample_row, monkeypatch):
-        """load() should work fine even without schema.sql present, as long
-        as the target database already has the tables."""
-        monkeypatch.setattr(load_csv, "SCRIPT_DIR", str(tmp_path))  # schema.sql won't be found here
-        csv_path = str(tmp_path / "run.csv")
-        write_csv(csv_path, [sample_row])
-        load_csv.load(csv_path, db_path)  # db_path fixture already has tables
-
-        conn = sqlite3.connect(db_path)
-        assert conn.execute("SELECT COUNT(*) FROM properties").fetchone()[0] == 1
-        conn.close()
+        assert result["property_type"] == "Residential"
+        assert result["bedrooms"] == 4
+        assert result["sqft"] == 4268

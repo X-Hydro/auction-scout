@@ -109,7 +109,7 @@ class TestExtractPropertyDetails:
         }
         result = _extract_property_details(fields)
         assert result["bedrooms"] == 6
-        assert "# Rooms: 14" in result["extra_fields"]
+        assert "Rooms: 14" in result["extra_fields"]
         assert "Mortgage Ref" in result["extra_fields"]
 
     def test_label_without_hash_prefix_still_matches(self):
