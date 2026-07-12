@@ -148,6 +148,77 @@ def parse_description(desc: str) -> dict:
     return out
 
 
+def _clean_int(raw: str):
+    """Pull the first number out of a messy numeric string, e.g. '2,296' ->
+    2296, '864 sf' -> 864, '4,353± sf' -> 4353. Returns None if no digits."""
+    if not raw:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    m = re.search(r"[\d,]+", raw)
+    if not m:
+        return None
+    digits = m.group(0).replace(",", "")
+    return int(digits) if digits.isdigit() else None
+
+
+def _clean_bathrooms(raw: str):
+    """Mirrors the Description-embedded '# Baths:' handling in
+    parse_description, but applied directly to a standalone column value
+    like '2.5' or '3 full / 2 half'."""
+    if not raw:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    simple = re.match(r"^(\d+(\.\d+)?)$", raw)
+    if simple:
+        return float(simple.group(1))
+    full = re.search(r"(\d+)\s*full", raw)
+    half = re.search(r"(\d+)\s*half", raw)
+    if full or half:
+        total = (int(full.group(1)) if full else 0) + 0.5 * (int(half.group(1)) if half else 0)
+        return total if total else None
+    return raw  # unrecognized format — keep the raw string rather than dropping it
+
+
+def resolve_property_details(row: dict, parsed_desc: dict) -> dict:
+    """Merge property details, preferring explicit CSV columns (Property
+    Type, Bedrooms, Bathrooms, Sqft, Lot Size, Year Built) — which spiders
+    like Sullivan now populate directly — over values parsed out of the
+    free-text Description field. Description-parsing is kept as a fallback
+    for any source that hasn't been updated to emit dedicated columns yet,
+    or for a row where a given column happens to be blank."""
+    out = dict(parsed_desc)
+
+    prop_type = (row.get("Property Type") or "").strip()
+    if prop_type:
+        out["property_type"] = prop_type
+
+    bedrooms_raw = (row.get("Bedrooms") or "").strip()
+    if bedrooms_raw:
+        out["bedrooms"] = _clean_int(bedrooms_raw)
+
+    bathrooms_raw = (row.get("Bathrooms") or "").strip()
+    if bathrooms_raw:
+        out["bathrooms"] = _clean_bathrooms(bathrooms_raw)
+
+    sqft_raw = (row.get("Sqft") or "").strip()
+    if sqft_raw:
+        out["sqft"] = _clean_int(sqft_raw)
+
+    lot_size_raw = (row.get("Lot Size") or "").strip()
+    if lot_size_raw:
+        out["lot_size_raw"] = lot_size_raw
+
+    year_built_raw = (row.get("Year Built") or "").strip()
+    if year_built_raw:
+        out["year_built"] = _clean_int(year_built_raw)
+
+    return out
+
+
 def _fmt_dt(iso_str):
     """ISO8601 -> 'Jul 8 11:00 AM'. Avoids strftime's %-d (not supported on
     Windows) by building the string manually instead."""
@@ -286,6 +357,7 @@ def load(csv_path: str, db_path: str):
                 sources_in_this_run.add(source_name)
                 listing_id = extract_listing_id(row["URL"], row["Name"])
                 parsed_desc = parse_description(row["Description"])
+                parsed_desc = resolve_property_details(row, parsed_desc)
                 auction_dt = parse_auction_datetime(row["Auction Date/Time"])
                 status = row["Status"].strip().lower()
 

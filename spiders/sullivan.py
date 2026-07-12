@@ -75,8 +75,15 @@ def _extract_property_details(fields):
         "bathrooms": bathrooms_raw,
         "year_built": _first_int(year_built_raw),
         # Whatever's left over (Mortgage Ref, # Rooms, anything with no
-        # dedicated column) -- still free text, exactly as before.
-        "extra_fields": "; ".join(f"{k}: {v}" for k, v in remaining.items()),
+        # dedicated column) -- still free text. Leading '#' is stripped
+        # from the label (e.g. "# Rooms" -> "Rooms") so this matches the
+        # AI-extracted version's formatting exactly -- the AI path
+        # normalizes this the same way, and there's no reason for the two
+        # pipelines to disagree on cosmetic label formatting when the
+        # underlying fact is identical.
+        "extra_fields": "; ".join(
+            f"{k.lstrip('#').strip()}: {v}" for k, v in remaining.items()
+        ),
     }
 
 

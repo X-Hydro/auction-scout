@@ -182,8 +182,18 @@ def geocode_with_fallbacks(
     if not remaining:
         return coords, []
 
-    # 2. Census batch geocoder.
-    census_results = geocode_batch(remaining)
+    # 2. Census batch geocoder. Wrapped because this endpoint is known to
+    #    time out / return inconsistent results under load (no published
+    #    Census SLA) -- a failure here should fall through to per-address
+    #    Nominatim below, not crash the whole run and lose every listing
+    #    already scraped before this point.
+    try:
+        census_results = geocode_batch(remaining)
+    except requests.RequestException as e:
+        print(f"WARNING: Census batch geocoder failed ({type(e).__name__}: {e}) "
+              f"-- falling back to Nominatim one address at a time for all "
+              f"{len(remaining)} remaining address(es). This will be slower.")
+        census_results = {}
 
     still_failing = []
     for aid, addr in remaining:
