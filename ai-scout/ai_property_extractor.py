@@ -24,6 +24,7 @@ daily on a listing that hasn't changed doesn't re-bill the API.
 from __future__ import annotations
 
 import os
+import re
 from typing import Optional
 
 import anthropic
@@ -94,7 +95,9 @@ class PropertySpecs(BaseModel):
     lot_size: Optional[str] = Field(
         None, description="Lot size exactly as written, including unit and "
                           "any +/- marker, e.g. '6,970± sf' or '2.13+/- Acres'. Do not "
-                          "convert units."
+                          "convert units. Drop a trailing standalone 'lot' word if present "
+                          "(e.g. '8,712 sf lot' -> '8,712 sf') -- it adds no information "
+                          "beyond the field itself."
     )
     year_built: Optional[int] = None
     extra_fields: Optional[str] = Field(
@@ -105,6 +108,19 @@ class PropertySpecs(BaseModel):
                           "'In-law home: 2BR/2BA, 1,802sf, built 2016'). Do not restate "
                           "property_type/bedrooms/bathrooms/sqft/lot_size/year_built here."
     )
+
+
+def _clean_lot_size(raw: str | None) -> str | None:
+    """Strips a trailing 'lot' word (e.g. '8,712 sf lot' -> '8,712 sf').
+    The system prompt already instructs the model to do this, but this
+    is a deterministic backstop rather than relying on model compliance
+    alone -- guarantees byte-identical output with sullivan.py's own
+    _clean_lot_size() regardless of what the model actually returns.
+    Only strips a trailing 'lot' token; values with no trailing 'lot'
+    (e.g. '2.13+/- Acres') pass through unchanged."""
+    if not raw:
+        return raw
+    return re.sub(r"\s+lot\s*$", "", raw, flags=re.IGNORECASE).strip()
 
 
 _SYSTEM_PROMPT = """You extract property specifications from a real \
@@ -125,7 +141,8 @@ house, converted barn, etc.) with its own bed/bath/sqft, do NOT merge \
 those numbers into the primary fields -- summarize it in extra_fields \
 instead.
 - lot_size should be copied close to verbatim, preserving unit and any \
-+/- notation.
++/- notation, but drop a trailing standalone "lot" word if present \
+(e.g. "8,712 sf lot" -> "8,712 sf").
 - extra_fields is a compact catch-all, not a transcript: only genuinely \
 distinct facts as short 'Label: value' pairs joined with '; '.
 """
@@ -161,6 +178,7 @@ def extract_property_specs(
     )
     tool_use = next(b for b in response.content if b.type == "tool_use")
     specs = PropertySpecs(**tool_use.input)
+    specs.lot_size = _clean_lot_size(specs.lot_size)
 
     _stats["api_calls"] += 1
     _stats["estimated_cost"] += _estimate_call_cost(text)

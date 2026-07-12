@@ -26,6 +26,19 @@ def _first_int(value):
         return None
 
 
+def _clean_lot_size(raw):
+    """Strips a trailing 'lot' word (e.g. '8,712 sf lot' -> '8,712 sf') --
+    the site inconsistently appends this to some listings' lot size but
+    not others, and it adds no information beyond what the field label
+    already conveys. Only strips a trailing 'lot' token; values like
+    '2.13+/- Acres' or '6,970± sf' (no trailing 'lot') pass through
+    unchanged. Matches the AI extractor's existing normalization, so
+    both pipelines produce the same output here."""
+    if not raw:
+        return raw
+    return re.sub(r"\s+lot\s*$", "", raw, flags=re.IGNORECASE).strip()
+
+
 def _extract_property_details(fields):
     """
     Route the labeled <li> fields (Property Type, Lot Size, Square Feet,
@@ -69,7 +82,7 @@ def _extract_property_details(fields):
     return {
         "county": county or "",
         "property_type": property_type,
-        "lot_size": lot_size,
+        "lot_size": _clean_lot_size(lot_size),
         "sqft": _first_int(sqft_raw),
         "bedrooms": _first_int(bedrooms_raw),
         "bathrooms": bathrooms_raw,
