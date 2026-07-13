@@ -4,6 +4,7 @@ import com.oncoord.auth.common.TokenRecord;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInfo;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.SingleConnectionDataSource;
@@ -25,21 +26,35 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * deliberately not mocking JdbcTemplate. A mock would only prove the
  * right SQL string was called; a real file proves the WHERE clause,
  * constraints, and type coercion actually behave as intended.
+ *
+ * <p>Each test's database file lands in src/test/db/, named after the
+ * test method, so it can be opened and queried manually for debugging
+ * after a run — e.g. with the sqlite3 CLI or DB Browser for SQLite.
+ * Files are NOT deleted after the test (unlike a typical @TempDir
+ * approach) specifically so they're there to inspect afterward. Each
+ * @BeforeEach deletes and recreates its own file fresh, so re-running
+ * tests doesn't accumulate stale data from a previous run, and test
+ * methods can't see each other's data either.
  */
 class AuctionScoutTokenStoreTest {
 
-    private Path dbPath;
+    private static final Path TEST_DB_DIR = Path.of("src/test/db");
+
     private SingleConnectionDataSource dataSource;
     private AuctionScoutTokenStore store;
 
     @BeforeEach
-    void setUp() throws IOException, SQLException {
-        dbPath = Files.createTempFile("auction-scout-manager-test", ".db");
+    void setUp(TestInfo testInfo) throws IOException, SQLException {
+        Files.createDirectories(TEST_DB_DIR);
+
+        Path dbPath = TEST_DB_DIR.resolve("auction-scout-manager.db");
+        Files.deleteIfExists(dbPath); // start each test clean, not accumulated across runs
+
         // Spring won't run schema init for a hand-built DataSource in a
         // plain unit test (that only happens inside a running Spring
         // context), so apply the real schema.sql explicitly here — same
         // file the app actually uses, no drift between test and prod schema.
-        dataSource = new SingleConnectionDataSource("jdbc:sqlite:" + dbPath, true);
+        dataSource = new SingleConnectionDataSource("jdbc:sqlite:" + dbPath.toAbsolutePath(), true);
         try (Connection conn = dataSource.getConnection()) {
             ScriptUtils.executeSqlScript(conn, new ClassPathResource("auction-scout-manager.sql"));
         }
@@ -48,10 +63,17 @@ class AuctionScoutTokenStoreTest {
     }
 
     @AfterEach
-    void tearDown() throws IOException {
+    void closeConnection() throws IOException {
         dataSource.destroy();
+        Path dbPath = TEST_DB_DIR.resolve("auction-scout-manager.db");
         Files.deleteIfExists(dbPath);
     }
+
+    // No @AfterEach cleanup — files are left in src/test/db/ intentionally
+    // so they can be opened after the run. dataSource.destroy() is skipped
+    // too; SingleConnectionDataSource holds one connection open for the
+    // test's duration, and letting the JVM exit closes it, which is fine
+    // for a test run.
 
     @Test
     void save_thenFindUnused_returnsTheSameEmailAndTimestamp() {
