@@ -32,8 +32,10 @@ public class VerifyController {
     // peek() call here first, same as the fix applied on oncoord-manager.
     @GetMapping("/verify")
     public ResponseEntity<?> verify(@RequestParam String email, @RequestParam String token) {
+        String normalizedEmail = email.trim().toLowerCase();
+
         Optional<TokenRecord> record = tokenService.verifyAndConsume(
-                email.trim().toLowerCase(), token, TOKEN_TTL_MILLIS
+                normalizedEmail, token, TOKEN_TTL_MILLIS
         );
 
         if (record.isEmpty()) {
@@ -42,13 +44,18 @@ public class VerifyController {
             ));
         }
 
-        subscribers.markVerified(email.trim().toLowerCase());
+        // Doubles as the subscriber's first login: activates the account
+        // and issues the storageSession token in one step, matching
+        // oncoord-manager's client-side pattern (sessionStorage + a
+        // bearer header on future requests) but with its own token,
+        // since AuctionScout subscribers aren't oncoord-manager API
+        // customers and the two credentials shouldn't be conflated.
+        String sessionToken = subscribers.markVerifiedAndIssueSessionToken(normalizedEmail);
 
-        // TODO: establish a session here (e.g. issue a session cookie or
-        // a short-lived JWT) — this doubles as the subscriber's first login.
         return ResponseEntity.ok(Map.of(
                 "message", "Email verified.",
-                "email", email.trim().toLowerCase()
+                "email", normalizedEmail,
+                "sessionToken", sessionToken
         ));
     }
 }

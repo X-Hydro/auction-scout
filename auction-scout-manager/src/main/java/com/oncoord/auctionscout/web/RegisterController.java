@@ -2,6 +2,7 @@ package com.oncoord.auctionscout.web;
 
 import com.oncoord.auth.common.RecaptchaClient;
 import com.oncoord.auth.common.TokenService;
+import com.oncoord.auctionscout.mail.OneTimeLinkMailer;
 import com.oncoord.auctionscout.subscriber.SubscriberRepository;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -16,19 +17,21 @@ public class RegisterController {
     // Single implicit purpose (per decision: this table has no purpose
     // column, so every token issued from AuctionScoutTokenStore is scoped
     // by this constant rather than by a persisted column).
+    private static final String PURPOSE = "auctionscout";
 
     private final RecaptchaClient recaptchaClient;
     private final TokenService tokenService;
     private final SubscriberRepository subscribers;
-    // TODO: swap in OneTimeLinkMailer from oncoord-auth-common once wired
-    // — for now this just logs the raw link so you can test the loop.
+    private final OneTimeLinkMailer mailer;
 
     public RegisterController(RecaptchaClient recaptchaClient,
                               TokenService tokenService,
-                              SubscriberRepository subscribers) {
+                              SubscriberRepository subscribers,
+                              OneTimeLinkMailer mailer) {
         this.recaptchaClient = recaptchaClient;
         this.tokenService = tokenService;
         this.subscribers = subscribers;
+        this.mailer = mailer;
     }
 
     // Field named "captcha" (not "recaptchaToken") to match the request
@@ -58,12 +61,7 @@ public class RegisterController {
         }
 
         String rawToken = tokenService.issue(email);
-
-        // TODO: replace with OneTimeLinkMailer.sendRegistrationLink(email, rawToken)
-        System.out.println("🔗 [DEV ONLY] Magic link for " + email
-                + ": https://www.oncoord.com/auction-scout/post-login.html#email="
-                + java.net.URLEncoder.encode(email, java.nio.charset.StandardCharsets.UTF_8)
-                + "&token=" + rawToken);
+        mailer.sendRegistrationLink(email, rawToken);
 
         return ResponseEntity.ok(Map.of(
                 "message", "If that email is valid, a confirmation link has been sent."
