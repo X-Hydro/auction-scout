@@ -4,6 +4,7 @@ import com.oncoord.auctionscout.properties.PropertyDigestRepository;
 import com.oncoord.auctionscout.properties.PropertyDigestRepository.ChangedListing;
 import com.oncoord.auctionscout.properties.PropertyDigestRepository.UpcomingListing;
 import com.oncoord.auctionscout.subscriber.SubscriberRepository;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -35,10 +36,14 @@ public class DigestService {
 
     private final PropertyDigestRepository repository;
     private final SubscriberRepository subscribers;
+    private final String appBaseUrl;
 
-    public DigestService(PropertyDigestRepository repository, SubscriberRepository subscribers) {
+    public DigestService(PropertyDigestRepository repository,
+                         SubscriberRepository subscribers,
+                         @Value("${auctionscout.app.base-url}") String appBaseUrl) {
         this.repository = repository;
         this.subscribers = subscribers;
+        this.appBaseUrl = appBaseUrl;
     }
 
     /**
@@ -66,7 +71,7 @@ public class DigestService {
         List<ChangedListing> changes = repository.findRecentChanges(states, changesSince);
 
         return """
-                <html><head><style>
+                <html><head><base target="_top"><style>
                     body { font-family: -apple-system, Helvetica, Arial, sans-serif; color: #1a1a1a; margin:0; padding:0; background:#f4f4f4; }
                     .container { max-width: 640px; margin: 0 auto; background:#ffffff; }
                     .header { background:#1a3a5c; color:#ffffff; padding:24px 32px; }
@@ -122,8 +127,8 @@ public class DigestService {
             }
 
             String mapLink = (listing.latitude() != null && listing.longitude() != null)
-                    ? " &nbsp;·&nbsp; <a href='https://www.oncoord.com/auction-scout?lat=%s&lng=%s&zoom=16'>View map →</a>"
-                    .formatted(listing.latitude(), listing.longitude())
+                    ? " &nbsp;·&nbsp; <a href='%s/auction-scout/?lat=%s&lng=%s&zoom=16'>View map →</a>"
+                    .formatted(appBaseUrl, listing.latitude(), listing.longitude())
                     : "";
 
             html.append("""
