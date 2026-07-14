@@ -277,7 +277,6 @@ def build_report(run_id, started_at, csv_path, db_path, records_found, records_n
     L.append(f"Listings processed:    {records_found}")
     L.append(f"New properties:        {records_new}")
     L.append(f"Changed auctions:      {records_changed}")
-    L.append(f"Disappeared listings:  {disappeared_count}")
     L.append(f"Failed rows:           {records_failed}")
     L.append("")
     L.append("CHANGES")
@@ -287,7 +286,6 @@ def build_report(run_id, started_at, csv_path, db_path, records_found, records_n
     L.extend(section("Auction date changes", by_type["date_change"],
                      lambda r: f"{r[0]:<40} {_fmt_dt(r[1])} -> {_fmt_dt(r[2])}"))
     L.extend(section("New listings", by_type["first_seen"], lambda r: r[0]))
-    L.extend(section("Disappeared", by_type["disappeared"], lambda r: r[0]))
 
     L.append("FAILED ROWS")
     L.append("-" * REPORT_WIDTH)

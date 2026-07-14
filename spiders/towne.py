@@ -11,9 +11,15 @@ itself is the clean street address), City, State, Zip Code, County,
 Page/Liber, Deposit, Important Information.
 
 STATUS HANDLING:
-- "Canceled" -> skipped (normalized to "cancelled" so base's default
-  skip_statuses catches it despite the site's one-L spelling)
-- "On_Time" -> kept, date/time built from the Auction Date + Time columns
+- "Canceled" -> kept (falls into the generic "unrecognized status" branch:
+  no date guessed, status passed through as-is). Previously skipped here
+  entirely, which meant a cancelled listing never reached the database and
+  only showed up downstream as an ambiguous "disappeared" event instead of
+  a real status_change to cancelled. export_json.py's EXCLUDED_STATUSES
+  (which already covers both the one-L and two-L spellings) is what keeps
+  it off the live map now -- this file's only job is accurate parsing.
+- "On_Time" -> kept, normalized to status "active" (matching every other
+  source), date/time built from the Auction Date + Time columns
 - "Postponed to M/D/YYYY" -> kept, but the EFFECTIVE date used is the one
   embedded in the status text (the new date), not the row's own Auction
   Date column (which is the stale original date)
@@ -22,8 +28,9 @@ DEDUP: postponed listings that have already been re-listed appear TWICE in
 the table -- once as "Postponed to <date>" under the original date, once
 as "On_Time" under the new date, same address both times (confirmed by
 sampling: all 4 postponed listings in the initial sample had a matching
-On_Time row). Per explicit decision: keep ONE row only, preferring On_Time
-over Postponed when both exist for the same property. This is done here
+On_Time row). Per explicit decision: keep ONE row only, preferring the
+active (formerly "On_Time") row over Postponed when both exist for the
+same property. This is done here
 via an address-based composite id + priority merge inside parse_listing()
 itself (single page, no need for base.py's cross-page dedup machinery).
 """
@@ -33,7 +40,7 @@ from datetime import datetime
 
 from base import AuctionSpider, classify_timing
 
-STATUS_PRIORITY = {"on_time": 2, "postponed": 1}
+STATUS_PRIORITY = {"active": 2, "postponed": 1}
 
 
 def _slug(text):
@@ -101,17 +108,26 @@ class TowneAuctionSpider(AuctionSpider):
             important_info = cells[10].get_text(strip=True)
 
             status_lower = status_raw.lower()
-            if status_lower.startswith("cancel"):
-                continue  # normalize both Canceled/Cancelled spellings to skip
 
             if status_lower.startswith("postponed"):
                 status_key = "postponed"
                 auction_dt, timing = _parse_postponed_date(status_raw)
                 date_time_display = status_raw  # e.g. "Postponed to 8/21/2026"
             elif status_lower.startswith("on_time") or status_lower.startswith("on time"):
-                status_key = "on_time"
+                # Site's own spelling is "On_Time"; normalize to "active"
+                # here, matching every other source, so nothing
+                # downstream needs to know Towne spells this differently.
+                status_key = "active"
                 auction_dt, timing = _parse_on_time_date(date_raw, time_raw)
                 date_time_display = f"{date_raw} {time_raw}"
+            elif status_lower.startswith("cancel"):
+                # Site spells this "Canceled" (one L); normalize to the
+                # two-L "cancelled" spelling here, at the source, so the
+                # CSV this spider produces already matches Harmon/Patriot
+                # rather than relying on a downstream fixup.
+                status_key = "cancelled"
+                auction_dt, timing = None, "Unknown"
+                date_time_display = status_raw
             else:
                 # Unrecognized status -- keep it but don't guess a date.
                 status_key = status_lower

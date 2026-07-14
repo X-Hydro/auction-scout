@@ -131,11 +131,20 @@ class SullivanSpider(AuctionSpider):
             auction_id = re.search(r"id=(\d+)", url)
             auction_id = auction_id.group(1) if auction_id else None
 
+            status_raw = status_cell.get_text(strip=True)
+            # Site's own status text is terse ("on" for a currently-
+            # scheduled auction, confirmed live -- not a parsing
+            # artifact). Normalize to "active", matching the majority
+            # spelling used by Brock & Scott/Patriot/JJManning, at the
+            # source rather than leaving it for a downstream consumer
+            # to special-case.
+            status = "active" if status_raw.lower() == "on" else status_raw
+
             rows.append({
                 "id": auction_id,
                 "url": url,
                 "date_time": link.get_text(strip=True),
-                "status": status_cell.get_text(strip=True),
+                "status": status,
                 "street": street_cell.get_text(strip=True),
                 "city_state": city_cell.get_text(strip=True),
                 "description": desc_cell.get_text(strip=True),

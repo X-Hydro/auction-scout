@@ -93,6 +93,18 @@ public class PropertyDigestRepository {
      * passed straight through, no interpretation. One row per event,
      * not deduplicated per auction, so a single auction with multiple
      * events in the window produces multiple rows.
+     *
+     * One narrow exception to the "no status filtering" rule: events for
+     * a listing that's both dateless (auction_datetime IS NULL) AND
+     * already in a terminal state (cancelled/sold/3rd-party-purchase)
+     * are excluded. Confirmed via live data that every current
+     * NULL-date row falls into exactly this set — these are typically
+     * Harmon listings discovered via ID-range probing that were already
+     * closed by the time they were first scraped, so a "New" alert for
+     * one is pure noise, not a real change a subscriber cares about.
+     * This isn't reintroducing a status taxonomy; it's excluding rows
+     * that carry zero actionable information regardless of what the
+     * status string says.
      */
     public List<ChangedListing> findRecentChanges(List<String> states, OffsetDateTime since) {
         if (states.isEmpty()) {
@@ -110,6 +122,10 @@ public class PropertyDigestRepository {
                   AND p.state IN (%s)
                   AND NOT EXISTS (
                       SELECT 1 FROM property_duplicate_links d WHERE d.property_id = p.property_id
+                  )
+                  AND NOT (
+                      a.auction_datetime IS NULL
+                      AND a.status IN ('cancelled', 'sold back to mortgagee', '3rd party purchase')
                   )
                 ORDER BY e.detected_at DESC
                 """.formatted(placeholders);
