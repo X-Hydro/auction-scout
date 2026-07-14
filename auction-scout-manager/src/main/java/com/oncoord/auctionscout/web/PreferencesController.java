@@ -9,6 +9,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+// Only responsible for reading/writing state selections now — status
+// display moved to StatusController.
 @RestController
 public class PreferencesController {
 

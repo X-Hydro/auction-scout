@@ -1,0 +1,157 @@
+package com.oncoord.auctionscout.properties;
+
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Repository;
+
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.util.List;
+
+/**
+ * Reads from auctionscout.db (properties/auctions/auction_events),
+ * written by the Python scraping pipeline. This service never writes
+ * to it.
+ *
+ * Deliberately "dumb": no status interpretation, no filtering by
+ * status text, no mapping unknown values to a fixed set of tags.
+ * Real-world status values (confirmed by querying live data) don't
+ * match the schema comment's documented "on|postponed|canceled|sold"
+ * vocabulary at all — actual values include "active", "on_time",
+ * "sold back to mortgagee", "3rd party purchase", and at least one
+ * value ("selling absolute above $100k") that doesn't look like a
+ * lifecycle status at all. Rather than guess a mapping and risk
+ * silently hiding rows the way an earlier version of this file did,
+ * this layer just passes whatever's in the database straight through.
+ * Data cleanup is happening upstream in the Python pipeline instead.
+ *
+ * Two DIFFERENT date formats, confirmed against real rows — NOT a bug,
+ * two different parsers used deliberately:
+ *   - auction_datetime: local time, no offset, e.g. "2026-07-14T10:00:00"
+ *     (an auction's 10am is 10am in New England regardless of server tz)
+ *   - detected_at: UTC with offset and microseconds, e.g.
+ *     "2026-07-09T17:52:56.038411+00:00" (a pipeline bookkeeping timestamp)
+ */
+@Repository
+public class PropertyDigestRepository {
+
+    public record UpcomingListing(
+            String address, String state, Double latitude, Double longitude,
+            String sourceUrl, LocalDateTime auctionDateTime) {}
+
+    public record ChangedListing(
+            String address, String state, String eventType,
+            String oldValue, String newValue, LocalDateTime auctionDateTime) {}
+
+    private final JdbcTemplate jdbc;
+
+    public PropertyDigestRepository(@Qualifier("propertiesJdbcTemplate") JdbcTemplate jdbc) {
+        this.jdbc = jdbc;
+    }
+
+    /**
+     * All auctions in the given date window, for the given states — no
+     * status filtering at all. If a sold/cancelled listing has a stale
+     * future auction_datetime, it'll show up here; that's a data
+     * problem to fix at the source, not something this query papers
+     * over by guessing which status strings count as "still upcoming".
+     */
+    public List<UpcomingListing> findUpcoming(List<String> states, LocalDateTime from, LocalDateTime to) {
+        if (states.isEmpty()) {
+            return List.of();
+        }
+        String placeholders = String.join(",", states.stream().map(s -> "?").toList());
+
+        String sql = """
+                SELECT p.address_raw, p.state, p.latitude, p.longitude,
+                       a.source_url, a.auction_datetime
+                FROM auctions a
+                JOIN properties p ON p.property_id = a.property_id
+                WHERE a.auction_datetime BETWEEN ? AND ?
+                  AND p.state IN (%s)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM property_duplicate_links d WHERE d.property_id = p.property_id
+                  )
+                ORDER BY a.auction_datetime
+                """.formatted(placeholders);
+
+        Object[] args = buildArgs(from.toString(), to.toString(), states);
+
+        return jdbc.query(sql, (rs, rowNum) -> new UpcomingListing(
+                rs.getString("address_raw"),
+                rs.getString("state"),
+                (Double) rs.getObject("latitude"),
+                (Double) rs.getObject("longitude"),
+                rs.getString("source_url"),
+                parseLocal(rs.getString("auction_datetime"))
+        ), args);
+    }
+
+    /**
+     * Every first_seen/status_change/date_change event since the given
+     * cutoff, for the given states — raw event_type/old_value/new_value
+     * passed straight through, no interpretation. One row per event,
+     * not deduplicated per auction, so a single auction with multiple
+     * events in the window produces multiple rows.
+     */
+    public List<ChangedListing> findRecentChanges(List<String> states, OffsetDateTime since) {
+        if (states.isEmpty()) {
+            return List.of();
+        }
+        String placeholders = String.join(",", states.stream().map(s -> "?").toList());
+
+        String sql = """
+                SELECT p.address_raw, p.state, a.auction_datetime,
+                       e.event_type, e.old_value, e.new_value
+                FROM auction_events e
+                JOIN auctions a ON a.auction_id = e.auction_id
+                JOIN properties p ON p.property_id = a.property_id
+                WHERE e.detected_at >= ?
+                  AND p.state IN (%s)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM property_duplicate_links d WHERE d.property_id = p.property_id
+                  )
+                ORDER BY e.detected_at DESC
+                """.formatted(placeholders);
+
+        Object[] args = buildArgs(since.toString(), states);
+
+        return jdbc.query(sql, (rs, rowNum) -> new ChangedListing(
+                rs.getString("address_raw"),
+                rs.getString("state"),
+                rs.getString("event_type"),
+                rs.getString("old_value"),
+                rs.getString("new_value"),
+                parseLocal(rs.getString("auction_datetime"))
+        ), args);
+    }
+
+    private static Object[] buildArgs(String a, String b, List<String> states) {
+        Object[] args = new Object[2 + states.size()];
+        args[0] = a;
+        args[1] = b;
+        for (int i = 0; i < states.size(); i++) {
+            args[2 + i] = states.get(i);
+        }
+        return args;
+    }
+
+    private static Object[] buildArgs(String a, List<String> states) {
+        Object[] args = new Object[1 + states.size()];
+        args[0] = a;
+        for (int i = 0; i < states.size(); i++) {
+            args[1 + i] = states.get(i);
+        }
+        return args;
+    }
+
+    // auction_datetime: local, no offset
+    private static LocalDateTime parseLocal(String raw) {
+        if (raw == null) return null;
+        try {
+            return LocalDateTime.parse(raw);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+}
