@@ -364,8 +364,10 @@ class AuctionSpider(ABC):
             print(f"[{self.name}] Fetching listing: {listing_url}")
             soup = self.get_soup(listing_url)
             for row in self.parse_listing(soup, listing_url):
-                if row.get("status", "").lower() in self.skip_statuses:
-                    continue
+                #we still want cancelled for the reports... we just don't 
+                #want them on the maps
+                #if row.get("status", "").lower() in self.skip_statuses:
+                #    continue
                 if not row.get("id"):
                     continue
                 row["source"] = self.name
