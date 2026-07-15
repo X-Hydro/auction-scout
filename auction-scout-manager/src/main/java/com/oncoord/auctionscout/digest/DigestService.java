@@ -34,6 +34,14 @@ public class DigestService {
     private static final DateTimeFormatter DAY_HEADER = DateTimeFormatter.ofPattern("EEEE, MMMM d", Locale.US);
     private static final DateTimeFormatter LISTING_META = DateTimeFormatter.ofPattern("MM/dd 'at' h:mm a", Locale.US);
 
+    // "New" listing noise filter (see renderChanges): a brand-new listing
+    // whose auction is more than FAR_OUT_DAYS away, and that hasn't
+    // accumulated at least MIN_HISTORY_DAYS of confirmed observation
+    // (last_seen_at - first_seen_at), is suppressed from the digest
+    // rather than announced as "New". Tune both here, in one place.
+    private static final int FAR_OUT_DAYS = 30;
+    private static final int MIN_HISTORY_DAYS = 7;
+
     private final PropertyDigestRepository repository;
     private final SubscriberRepository subscribers;
     private final String appBaseUrl;
@@ -166,6 +174,7 @@ public class DigestService {
         StringBuilder rows = new StringBuilder("<table class='status-table'>\n");
         boolean anyRows = false;
         for (List<ChangedListing> group : byAddress.values()) {
+            ChangedListing first = group.get(0);
             boolean wasNew = group.stream().anyMatch(c -> "first_seen".equals(c.eventType()));
             boolean wasRemoved = group.stream().anyMatch(c -> "disappeared".equals(c.eventType()));
 
@@ -178,7 +187,37 @@ public class DigestService {
                 continue;
             }
 
-            ChangedListing first = group.get(0);
+            // A brand-new listing that's both far out (>30 days) and
+            // hasn't accumulated at least 7 days of observed history yet
+            // (last_seen_at is still within 7 days of first_seen_at)
+            // matches the profile of listings that show up and vanish
+            // within days -- suppress the "New" announcement for these.
+            // This is a broader bar than "never reconfirmed at all": a
+            // listing rescraped once or twice within just a couple days
+            // still hasn't demonstrated much, so it's held to the same
+            // standard as one that's been seen only once. Using actual
+            // observed-history length rather than a fixed calendar cutoff
+            // off first_seen_at is deliberately conservative: since
+            // scrapes run frequently, most real listings accumulate 7
+            // days of history quickly and pass through untouched; only
+            // genuinely short-lived listings get caught. NOTE: first_seen
+            // only fires once and the digest window only looks back 7
+            // days, so a listing suppressed here does NOT get
+            // re-announced later once it accumulates enough history -- it
+            // simply never gets a "New" tag at all if that happens after
+            // this digest already ran. Accepted tradeoff per explicit
+            // decision; revisit if under-reporting becomes a problem
+            // (would need a persisted "already announced" flag instead
+            // of relying solely on the one-shot first_seen event).
+            if (wasNew && !wasRemoved && first.auctionDateTime() != null
+                    && first.firstSeenAt() != null && first.lastSeenAt() != null) {
+                boolean farOut = first.auctionDateTime().isAfter(LocalDateTime.now().plusDays(FAR_OUT_DAYS));
+                boolean notEnoughHistoryYet = first.lastSeenAt().isBefore(first.firstSeenAt().plusDays(MIN_HISTORY_DAYS));
+                if (farOut && notEnoughHistoryYet) {
+                    continue;
+                }
+            }
+
             String dateText = first.auctionDateTime() != null
                     ? first.auctionDateTime().format(LISTING_META)
                     : "date unknown";

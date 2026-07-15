@@ -41,7 +41,8 @@ public class PropertyDigestRepository {
 
     public record ChangedListing(
             String address, String state, String eventType,
-            String oldValue, String newValue, LocalDateTime auctionDateTime) {}
+            String oldValue, String newValue, LocalDateTime auctionDateTime,
+            OffsetDateTime firstSeenAt, OffsetDateTime lastSeenAt) {}
 
     private final JdbcTemplate jdbc;
 
@@ -105,6 +106,13 @@ public class PropertyDigestRepository {
      * This isn't reintroducing a status taxonomy; it's excluding rows
      * that carry zero actionable information regardless of what the
      * status string says.
+     * "disappeared" events ARE included here (unlike load_csv.py's raw
+     * DB terminology) but are relabeled "Removed" at render time in
+     * DigestService -- the internal event_type name stays "disappeared"
+     * in the database; every subscriber-facing surface says "Removed"
+     * instead, since we don't actually know what happened (sold,
+     * cancelled, or a scraper miss are all indistinguishable from this
+     * event alone) and "disappeared" reads oddly as a listing status.
      */
     public List<ChangedListing> findRecentChanges(List<String> states, OffsetDateTime since) {
         if (states.isEmpty()) {
@@ -113,7 +121,7 @@ public class PropertyDigestRepository {
         String placeholders = String.join(",", states.stream().map(s -> "?").toList());
 
         String sql = """
-                SELECT p.address_raw, p.state, a.auction_datetime,
+                SELECT p.address_raw, p.state, p.first_seen_at, p.last_seen_at, a.auction_datetime,
                        e.event_type, e.old_value, e.new_value
                 FROM auction_events e
                 JOIN auctions a ON a.auction_id = e.auction_id
@@ -138,7 +146,9 @@ public class PropertyDigestRepository {
                 rs.getString("event_type"),
                 rs.getString("old_value"),
                 rs.getString("new_value"),
-                parseLocal(rs.getString("auction_datetime"))
+                parseLocal(rs.getString("auction_datetime")),
+                parseOffset(rs.getString("first_seen_at")),
+                parseOffset(rs.getString("last_seen_at"))
         ), args);
     }
 
@@ -166,6 +176,16 @@ public class PropertyDigestRepository {
         if (raw == null) return null;
         try {
             return LocalDateTime.parse(raw);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    // first_seen_at / detected_at: UTC with offset and microseconds
+    private static OffsetDateTime parseOffset(String raw) {
+        if (raw == null) return null;
+        try {
+            return OffsetDateTime.parse(raw);
         } catch (Exception e) {
             return null;
         }
