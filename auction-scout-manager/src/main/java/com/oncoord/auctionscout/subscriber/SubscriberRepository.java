@@ -10,10 +10,13 @@ import java.util.Optional;
 /**
  * Subscriber persistence, including the session_token used for the
  * storageSession pattern (matching oncoord-manager's oncoord_api_key
- * convention: a permanent, non-expiring bearer token stored client-side
- * in sessionStorage and sent back as a request header) and state
- * preferences (max 4 per subscriber, enforced here since SQLite can't
- * express that as a table constraint).
+ * convention: a bearer token stored client-side in sessionStorage and
+ * sent back as a request header). It has no timed expiry — it stays
+ * valid until either explicitly revoked via invalidateSessionToken()
+ * (see LogoutController) or rotated by a fresh markVerifiedAndIssue-
+ * SessionToken() call. State preferences (max 4 per subscriber) are
+ * also enforced here since SQLite can't express that as a table
+ * constraint.
  */
 @Repository
 public class SubscriberRepository {
@@ -71,6 +74,25 @@ public class SubscriberRepository {
                 rs -> rs.next() ? Optional.of(rs.getString("email")) : Optional.empty(),
                 sessionToken
         );
+    }
+
+    /**
+     * Explicit, server-side logout. session_token is otherwise
+     * permanent and non-expiring by design (see class javadoc) --
+     * without this, a leaked token (browser extension, XSS, a shared
+     * computer someone forgot to log out of) remains a valid bearer
+     * credential forever, since nothing else in this class ever clears
+     * it. This is the one path that revokes the credential itself,
+     * rather than just the browser's local copy of it.
+     *
+     * Matches on the token rather than requiring a resolved email
+     * first, and is a silent no-op if the token doesn't match any row
+     * -- the caller (LogoutController) always responds the same way
+     * either way, so this can't be used to probe which tokens are
+     * currently valid.
+     */
+    public void invalidateSessionToken(String sessionToken) {
+        jdbc.update("UPDATE subscribers SET session_token = NULL WHERE session_token = ?", sessionToken);
     }
 
     public Optional<String> findActiveEmail(String email) {
