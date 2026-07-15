@@ -32,6 +32,10 @@ import json
 import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from datetime import date
+import shutil
+
 
 # Statuses that mean the auction is over and should NOT appear on the live map.
 # Add to this list as new terminal-status wording turns up across sources.
@@ -109,6 +113,14 @@ def export(db_path: str, json_path: str):
         WHERE a.status NOT IN ({placeholders})
           AND p.latitude IS NOT NULL AND p.longitude IS NOT NULL
           AND p.last_seen_at >= ?
+          AND NOT EXISTS (
+              SELECT 1 FROM auction_events de
+              WHERE de.auction_id = a.auction_id
+                AND de.event_type = 'disappeared'
+                AND de.event_id = (
+                    SELECT MAX(event_id) FROM auction_events WHERE auction_id = a.auction_id
+                )
+          )
           {dedup_exclusion}
         ORDER BY a.auction_datetime ASC
         """,
@@ -158,6 +170,26 @@ def export(db_path: str, json_path: str):
         "SELECT COUNT(*) FROM property_duplicate_links"
     ).fetchone()[0] if has_dedup_table else 0
 
+    disappeared_rows = conn.execute(
+        f"""SELECT p.address_raw, p.source, a.status FROM auctions a
+            JOIN properties p ON p.property_id = a.property_id
+            WHERE a.status NOT IN ({placeholders})
+              AND p.latitude IS NOT NULL AND p.longitude IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM auction_events de
+                  WHERE de.auction_id = a.auction_id
+                    AND de.event_type = 'disappeared'
+                    AND de.event_id = (
+                        SELECT MAX(event_id) FROM auction_events WHERE auction_id = a.auction_id
+                    )
+              )""",
+        EXCLUDED_STATUSES,
+    ).fetchall()
+    excluded_disappeared = [
+        {"address": r["address_raw"], "source": r["source"], "status": r["status"]}
+        for r in disappeared_rows
+    ]
+
     stale_rows = conn.execute(
         f"""SELECT p.address_raw, p.source, a.status, p.last_seen_at FROM auctions a
             JOIN properties p ON p.property_id = a.property_id
@@ -179,6 +211,8 @@ def export(db_path: str, json_path: str):
         "excluded_missing_coords_count": len(excluded_missing_coords),
         "excluded_missing_coords": excluded_missing_coords[:25],  # capped sample
         "excluded_duplicates_count": excluded_duplicates_count,
+        "excluded_disappeared_count": len(excluded_disappeared),
+        "excluded_disappeared": excluded_disappeared[:25],  # capped sample
         "excluded_stale_count": len(excluded_stale),
         "excluded_stale": excluded_stale[:25],  # capped sample
     }
@@ -206,6 +240,11 @@ def export(db_path: str, json_path: str):
     if excluded_duplicates_count:
         print("Excluded as cross-source duplicates: {} "
               "(run dedup_properties.py to recompute)".format(excluded_duplicates_count))
+    if excluded_disappeared:
+        print("Excluded as disappeared (confirmed gone from source, status not yet "
+              "updated to reflect it): {}".format(len(excluded_disappeared)))
+        for r in excluded_disappeared[:10]:
+            print("  [{}] {!r} (status={!r})".format(r["source"], r["address"], r["status"]))
     if excluded_stale:
         print("Excluded as stale (not re-confirmed in {}+ days despite live status): {}".format(
             STALE_AFTER_DAYS, len(excluded_stale)))
@@ -219,3 +258,9 @@ if __name__ == "__main__":
     db_path = sys.argv[1] if len(sys.argv) > 1 else "auctionscout.db"
     json_path = sys.argv[2] if len(sys.argv) > 2 else "scout-properties.json"
     export(db_path, json_path)
+
+    json_backup = Path(f"{json_path}.{date.today():%Y.%m.%d}")
+    shutil.copy2(json_path, json_backup)
+    db_backup = Path(f"{db_path}.{date.today():%Y.%m.%d}")
+    shutil.copy2(db_path, db_backup)
+

@@ -12,6 +12,8 @@ import argparse
 import csv
 import re
 import sys
+import shutil
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -212,6 +214,8 @@ def main():
                 path = f"{source}_markers.csv"
                 n = write_csv(path, source_rows)
                 print(f"Wrote {path} ({n} markers)")
+                backup = Path(f"{path}.{date.today():%Y.%m.%d}")
+                shutil.copy2(path, backup)
 
 
 if __name__ == "__main__":

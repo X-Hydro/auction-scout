@@ -151,21 +151,70 @@ public class DigestService {
             return "<p class='empty'>No status changes to report this week.</p>";
         }
 
-        StringBuilder rows = new StringBuilder("<table class='status-table'>\n");
+        // Group by address so a property with multiple events in this
+        // window (e.g. a cancellation producing both a status_change AND
+        // a date_change) renders as one row with combined labels, not one
+        // row per event -- a subscriber seeing the same address twice in
+        // one digest reads as a bug even though the underlying data isn't
+        // wrong. LinkedHashMap preserves the query's detected_at DESC
+        // ordering for whichever address is encountered first.
+        java.util.Map<String, List<ChangedListing>> byAddress = new java.util.LinkedHashMap<>();
         for (ChangedListing change : changes) {
-            String dateText = change.auctionDateTime() != null
-                    ? change.auctionDateTime().format(LISTING_META)
-                    : "date unknown";
-            // Raw pass-through: event_type + new_value verbatim, no
-            // categorization. "first_seen" reads oddly as a raw label,
-            // so it gets the one hardcoded exception to "New" — every
-            // other event_type/new_value combination is shown as-is.
-            String label = "first_seen".equals(change.eventType())
-                    ? "New"
-                    : "%s: %s".formatted(change.eventType(), nullToDash(change.newValue()));
+            byAddress.computeIfAbsent(change.address(), k -> new java.util.ArrayList<>()).add(change);
+        }
 
-            rows.append("<tr><td>%s</td><td>%s</td><td><span class='tag'>%s</span></td></tr>\n".formatted(
-                    escape(change.address()), dateText, escape(label)));
+        StringBuilder rows = new StringBuilder("<table class='status-table'>\n");
+        boolean anyRows = false;
+        for (List<ChangedListing> group : byAddress.values()) {
+            boolean wasNew = group.stream().anyMatch(c -> "first_seen".equals(c.eventType()));
+            boolean wasRemoved = group.stream().anyMatch(c -> "disappeared".equals(c.eventType()));
+
+            // Appeared and vanished within the same digest window: the
+            // subscriber never had a real chance to see this listing, so
+            // reporting it as "Removed" (or anything else) is noise, not
+            // information. Skip the property entirely rather than
+            // showing any tag for it.
+            if (wasNew && wasRemoved) {
+                continue;
+            }
+
+            ChangedListing first = group.get(0);
+            String dateText = first.auctionDateTime() != null
+                    ? first.auctionDateTime().format(LISTING_META)
+                    : "date unknown";
+
+            // Raw pass-through: event_type + new_value verbatim, no
+            // categorization -- except two hardcoded label overrides.
+            // "first_seen" -> "New" reads better than the raw name.
+            // "disappeared" -> "Removed": the DB/internal event_type
+            // stays "disappeared", but nothing subscriber-facing should
+            // say that -- we don't actually know what happened (sold,
+            // cancelled, a scraper miss are all indistinguishable from
+            // this event alone), and "Removed" is the neutral, external
+            // term for "no longer tracked" without implying a cause.
+            String labels;
+            if (wasRemoved) {
+                // "Removed" wins outright over any other event in the
+                // same window (e.g. a status_change a few days earlier)
+                // -- avoids a contradictory-looking combination of tags.
+                labels = "<span class='tag'>%s</span>".formatted(escape("Removed"));
+            } else {
+                labels = group.stream()
+                        .map(change -> "first_seen".equals(change.eventType())
+                                ? "New"
+                                : "%s: %s".formatted(change.eventType(), nullToDash(change.newValue())))
+                        .distinct()
+                        .map(DigestService::escape)
+                        .map(l -> "<span class='tag'>%s</span>".formatted(l))
+                        .collect(java.util.stream.Collectors.joining(" "));
+            }
+
+            rows.append("<tr><td>%s</td><td>%s</td><td>%s</td></tr>\n".formatted(
+                    escape(first.address()), dateText, labels));
+            anyRows = true;
+        }
+        if (!anyRows) {
+            return "<p class='empty'>No status changes to report this week.</p>";
         }
         rows.append("</table>");
         return rows.toString();
