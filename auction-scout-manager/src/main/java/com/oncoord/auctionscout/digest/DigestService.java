@@ -237,11 +237,17 @@ public class DigestService {
                 // same window (e.g. a status_change a few days earlier)
                 // -- avoids a contradictory-looking combination of tags.
                 labels = "<span class='tag'>%s</span>".formatted(escape("Removed"));
+            } else if (wasNew) {
+                // "New" wins outright too, same reasoning as "Removed"
+                // above: if the subscriber is seeing this listing for
+                // the first time, a status_change/date_change from
+                // earlier in the same window has no "before" state for
+                // them to have seen -- "date_change: 2026-08-03T12:00:00
+                // New" is noise, not information. Just "New".
+                labels = "<span class='tag'>%s</span>".formatted(escape("New"));
             } else {
                 labels = group.stream()
-                        .map(change -> "first_seen".equals(change.eventType())
-                                ? "New"
-                                : "%s: %s".formatted(change.eventType(), nullToDash(change.newValue())))
+                        .map(change -> "%s: %s".formatted(change.eventType(), nullToDash(change.newValue())))
                         .distinct()
                         .map(DigestService::escape)
                         .map(l -> "<span class='tag'>%s</span>".formatted(l))
