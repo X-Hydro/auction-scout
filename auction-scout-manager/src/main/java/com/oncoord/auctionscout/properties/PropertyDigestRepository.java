@@ -1,6 +1,5 @@
 package com.oncoord.auctionscout.properties;
 
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -44,18 +43,26 @@ public class PropertyDigestRepository {
             String oldValue, String newValue, LocalDateTime auctionDateTime,
             OffsetDateTime firstSeenAt, OffsetDateTime lastSeenAt) {}
 
-    private final JdbcTemplate jdbc;
+    private final PropertiesDbConnectionManager dbManager;
 
-    public PropertyDigestRepository(@Qualifier("propertiesJdbcTemplate") JdbcTemplate jdbc) {
-        this.jdbc = jdbc;
+    public PropertyDigestRepository(PropertiesDbConnectionManager dbManager) {
+        this.dbManager = dbManager;
     }
 
     /**
      * All auctions in the given date window, for the given states — no
-     * status filtering at all. If a sold/cancelled listing has a stale
-     * future auction_datetime, it'll show up here; that's a data
+     * STATUS-TEXT filtering at all. If a sold/cancelled listing has a
+     * stale future auction_datetime, it'll show up here; that's a data
      * problem to fix at the source, not something this query papers
      * over by guessing which status strings count as "still upcoming".
+     *
+     * One exception, and it's NOT a status-text guess: auctions whose
+     * most recent auction_events row is 'disappeared' are excluded.
+     * That event means the pipeline structurally observed this listing
+     * vanish from its source on a later scrape — a fact from the audit
+     * trail, not an interpretation of a status string — so it has no
+     * business appearing as "upcoming" regardless of what stale
+     * auction_datetime or status text is still sitting on the row.
      */
     public List<UpcomingListing> findUpcoming(List<String> states, LocalDateTime from, LocalDateTime to) {
         if (states.isEmpty()) {
@@ -73,11 +80,20 @@ public class PropertyDigestRepository {
                   AND NOT EXISTS (
                       SELECT 1 FROM property_duplicate_links d WHERE d.property_id = p.property_id
                   )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM auction_events e
+                      WHERE e.auction_id = a.auction_id
+                        AND e.event_type = 'disappeared'
+                        AND e.event_id = (
+                            SELECT MAX(event_id) FROM auction_events WHERE auction_id = a.auction_id
+                        )
+                  )
                 ORDER BY a.auction_datetime
                 """.formatted(placeholders);
 
         Object[] args = buildArgs(from.toString(), to.toString(), states);
 
+        JdbcTemplate jdbc = dbManager.getJdbcTemplate();
         return jdbc.query(sql, (rs, rowNum) -> new UpcomingListing(
                 rs.getString("address_raw"),
                 rs.getString("state"),
@@ -140,6 +156,7 @@ public class PropertyDigestRepository {
 
         Object[] args = buildArgs(since.toString(), states);
 
+        JdbcTemplate jdbc = dbManager.getJdbcTemplate();
         return jdbc.query(sql, (rs, rowNum) -> new ChangedListing(
                 rs.getString("address_raw"),
                 rs.getString("state"),
