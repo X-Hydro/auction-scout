@@ -242,9 +242,11 @@ public class DigestService {
                 : "";
 
         return """
-                <div class='listing'><div class='addr'>%s</div><div class='meta'>%s</div>
+                <div class='listing' data-state='%s' data-date='%s'><div class='addr'>%s</div><div class='meta'>%s</div>
                 <a href='%s'>View listing →</a>%s</div>
                 """.formatted(
+                escape(listing.state()),
+                listing.auctionDateTime(),
                 escape(listing.address()),
                 listing.auctionDateTime().format(LISTING_META),
                 listing.sourceUrl(),
@@ -311,9 +313,9 @@ public class DigestService {
                     : "date unknown";
 
             if (wasRemoved) {
-                removedRows.add(changeRow(first, dateText, "<span class='tag'>%s</span>".formatted(escape("Removed"))));
+                removedRows.add(changeRow(first, dateText, "<span class='tag'>%s</span>".formatted(escape("Removed")), "Removed"));
             } else if (wasNew) {
-                newRows.add(changeRow(first, dateText, "<span class='tag'>%s</span>".formatted(escape("New"))));
+                newRows.add(changeRow(first, dateText, "<span class='tag'>%s</span>".formatted(escape("New")), "New"));
             } else {
                 // Raw pass-through: event_type + new_value verbatim, no
                 // categorization beyond the bucket assignment below.
@@ -323,8 +325,6 @@ public class DigestService {
                         .map(DigestService::escape)
                         .map(l -> "<span class='tag'>%s</span>".formatted(l))
                         .collect(java.util.stream.Collectors.joining(" "));
-                String row = changeRow(first, dateText, labels);
-
                 // An address can technically span more than one non-New/
                 // Removed event type in the same window (e.g. a
                 // postponement that also moved the date). date_change
@@ -332,6 +332,8 @@ public class DigestService {
                 // deterministic, and keeps a single address from
                 // appearing in two sections at once.
                 boolean hasDateChange = group.stream().anyMatch(c -> "date_change".equals(c.eventType()));
+                String category = hasDateChange ? "Date Changes" : "Status Changes";
+                String row = changeRow(first, dateText, labels, category);
                 if (hasDateChange) {
                     dateChangeRows.add(row);
                 } else {
@@ -362,9 +364,14 @@ public class DigestService {
         return html.toString();
     }
 
-    private String changeRow(ChangedListing listing, String dateText, String labels) {
-        return "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n"
-                .formatted(escape(listing.address()), dateText, labels, changeLinkCell(listing));
+    private String changeRow(ChangedListing listing, String dateText, String labels, String category) {
+        // data-date carries the raw auction datetime (or "" if unknown) so
+        // the status page can sort chronologically; dateText next to it is
+        // the human-readable string actually shown in the cell.
+        String isoDate = listing.auctionDateTime() != null ? listing.auctionDateTime().toString() : "";
+        return "<tr data-state='%s' data-date='%s' data-category='%s'><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n"
+                .formatted(escape(listing.state()), isoDate, escape(category),
+                        escape(listing.address()), dateText, labels, changeLinkCell(listing));
     }
 
     /**
