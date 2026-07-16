@@ -58,7 +58,7 @@ public class DigestService {
     // auction is coming up soon -- a change on something 3 months out
     // is informational, not something to act on immediately, so the
     // extra link is noise there. Tune here if the cutoff needs adjusting.
-    private static final int NEW_LISTING_LINK_WINDOW_DAYS  = 30;
+    private static final int NEW_LISTING_LINK_WINDOW_DAYS  = 21;
 
     // render() emits these literal placeholders instead of a real URL
     // for the two "View all ..." links, rather than resolving them
@@ -389,7 +389,13 @@ public class DigestService {
         }
         boolean withinWindow = listing.auctionDateTime().isBefore(LocalDateTime.now().plusDays(NEW_LISTING_LINK_WINDOW_DAYS ));
         if (!withinWindow) {
-            return "";
+            // Far-out auctions change too often between now and the
+            // actual date (postponements, cancellations, relistings) for
+            // a link to reliably still be accurate by the time someone
+            // clicks it — see NEW_LISTING_LINK_WINDOW_DAYS. "Coming soon"
+            // says something is on the way without pointing at a source
+            // page/map that may no longer reflect it by then.
+            return "<span class='empty'>Coming soon</span>";
         }
 
         String mapLink = (listing.latitude() != null && listing.longitude() != null)
