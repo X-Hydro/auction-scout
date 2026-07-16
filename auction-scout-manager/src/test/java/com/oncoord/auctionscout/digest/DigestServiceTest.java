@@ -90,7 +90,12 @@ class DigestServiceTest {
         dbManager = new PropertiesDbConnectionManager(DB_PATH.toString());
         testData = new PropertyDigestTestData(jdbc);
         PropertyDigestRepository repository = new PropertyDigestRepository(dbManager);
-        digestService = new DigestService(repository, null, "https://oncoord.com");
+        // null for both SubscriberRepository and TokenService: render()
+        // (the only method every test here calls) touches neither --
+        // only renderForSubscriber() does, for the email auto-login
+        // links. Same reasoning as the existing SubscriberRepository
+        // null, just now applying to the newer TokenService param too.
+        digestService = new DigestService(repository, null, null, "https://oncoord.com");
     }
 
     @AfterEach
@@ -272,6 +277,171 @@ class DigestServiceTest {
         // dropped entirely rather than shown as New, Removed, or both.
         assertFalse(html.contains("21 Poplar Place, Derry, NH"));
         assertTrue(html.contains("No status changes to report this week."));
+    }
+
+    // ---- section bucketing: New Listings / Date Changes / Removed --------
+    //
+    // renderChanges() splits Status Changes into 4 independently-capped
+    // subsections (New Listings, Date Changes, Status Changes, Removed)
+    // rather than one mixed table. These confirm each event type lands
+    // under the right heading, and that headings with nothing to show
+    // don't render at all -- not just that the right tag text exists
+    // somewhere, which the earlier tag-text tests already cover.
+    //
+    // Note: the overall section title "<h2>Status Changes</h2>" is
+    // always present regardless of bucket contents, so these
+    // deliberately don't assert its absence -- only the per-bucket
+    // subheadings ("New Listings", "Date Changes", "Removed").
+
+    @Test
+    void render_placesFirstSeenEvent_inNewListingsSection() {
+        long propertyId = testData.property()
+                .address("100 Ash Street, Keene, NH")
+                .state("NH")
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .noAuctionDatetime()
+                .insert();
+        testData.event(auctionId, "first_seen")
+                .newValue("active")
+                .insert();
+
+        String html = digestService.render(
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertTrue(html.contains("New Listings"),
+                "a first_seen-only address should render under the New Listings heading");
+        assertFalse(html.contains("Date Changes"),
+                "no date_change rows exist, so that subheading should not render at all");
+        assertFalse(html.contains(">Removed<"),
+                "no disappeared rows exist, so that subheading should not render at all");
+    }
+
+    @Test
+    void render_placesDisappearedEvent_inRemovedSection() {
+        long propertyId = testData.property()
+                .address("200 Birch Road, Keene, NH")
+                .state("NH")
+                .insert();
+        long auctionId = testData.auction(propertyId).insert();
+        testData.event(auctionId, "disappeared")
+                .oldValue("active")
+                .insert();
+
+        String html = digestService.render(
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertTrue(html.contains(">Removed<"),
+                "a disappeared-only address should render under the Removed heading");
+        assertFalse(html.contains("New Listings"),
+                "no first_seen rows exist, so that subheading should not render at all");
+        assertFalse(html.contains("Date Changes"),
+                "no date_change rows exist, so that subheading should not render at all");
+    }
+
+    @Test
+    void render_placesDateChangeEvent_inDateChangesSection() {
+        long propertyId = testData.property()
+                .address("300 Cherry Lane, Keene, NH")
+                .state("NH")
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .auctionDatetime("2026-07-20T10:00:00")
+                .insert();
+        testData.event(auctionId, "date_change")
+                .oldValue("2026-07-15T10:00:00")
+                .newValue("2026-07-20T10:00:00")
+                .insert();
+
+        String html = digestService.render(
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertTrue(html.contains("Date Changes"),
+                "a date_change-only address should render under the Date Changes heading");
+        assertFalse(html.contains("New Listings"),
+                "no first_seen rows exist, so that subheading should not render at all");
+        assertFalse(html.contains(">Removed<"),
+                "no disappeared rows exist, so that subheading should not render at all");
+    }
+
+    // ---- listing/map links on Status Change rows --------------------
+    //
+    // Every bucket shares the same changeRow()/changeLinkCell() code
+    // path, so exercising it via one bucket (date_change) is
+    // representative of all four -- the gating logic doesn't know or
+    // care which bucket a row ends up in.
+
+    @Test
+    void render_showsListingAndMapLinks_forChangeWithinTwoWeeks() {
+        // Relative to the real clock, same pattern as the existing
+        // upcoming-auction test -- CHANGE_LINK_WINDOW_DAYS is evaluated
+        // against LocalDateTime.now() inside DigestService itself, not
+        // a value this test controls directly.
+        String auctionDateTime = LocalDateTime.now().withNano(0).plusDays(5).toString();
+
+        long propertyId = testData.property()
+                .address("400 Dogwood Drive, Keene, NH")
+                .state("NH")
+                .latLng(42.9337, -72.2781)
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .auctionDatetime(auctionDateTime)
+                .sourceUrl("https://example.com/listing/9001")
+                .insert();
+        testData.event(auctionId, "date_change")
+                .oldValue("2026-07-10T10:00:00")
+                .newValue(auctionDateTime)
+                .insert();
+
+        String html = digestService.render(
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertTrue(html.contains("https://example.com/listing/9001"),
+                "expected a View listing link for a change within the 2-week window");
+        assertTrue(html.contains("lat=42.9337&amp;lng=-72.2781") || html.contains("lat=42.9337&lng=-72.2781"),
+                "expected a View map link built from the property's lat/lng");
+    }
+
+    @Test
+    void render_omitsListingLinks_forChangeMoreThanTwoWeeksOut() {
+        String auctionDateTime = LocalDateTime.now().withNano(0).plusDays(45).toString();
+
+        long propertyId = testData.property()
+                .address("500 Elmwood Ave, Keene, NH")
+                .state("NH")
+                .latLng(42.9337, -72.2781)
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .auctionDatetime(auctionDateTime)
+                .sourceUrl("https://example.com/listing/9002")
+                .insert();
+        testData.event(auctionId, "date_change")
+                .oldValue("2026-07-10T10:00:00")
+                .newValue(auctionDateTime)
+                .insert();
+
+        String html = digestService.render(
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertTrue(html.contains("500 Elmwood Ave, Keene, NH"),
+                "the row itself should still render -- only the link is gated by the window");
+        assertFalse(html.contains("https://example.com/listing/9002"),
+                "a change more than 2 weeks out should not get a View listing link");
     }
 
 }

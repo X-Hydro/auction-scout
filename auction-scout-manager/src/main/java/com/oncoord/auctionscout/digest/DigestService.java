@@ -54,6 +54,12 @@ public class DigestService {
     private static final int MAX_LISTINGS_PER_DAY = 5;
     private static final int MAX_CHANGES_PER_BUCKET = 5;
 
+    // Status-change rows only get a "View listing/map" link if the
+    // auction is coming up soon -- a change on something 3 months out
+    // is informational, not something to act on immediately, so the
+    // extra link is noise there. Tune here if the cutoff needs adjusting.
+    private static final int NEW_LISTING_LINK_WINDOW_DAYS  = 30;
+
     // render() emits these literal placeholders instead of a real URL
     // for the two "View all ..." links, rather than resolving them
     // itself — it has no subscriber email to build a personalized
@@ -164,6 +170,7 @@ public class DigestService {
                     .listing a { color:#1a5c9c; text-decoration:none; font-size:13px; }
                     table.status-table { width:100%%; border-collapse:collapse; font-size:13px; }
                     table.status-table td { padding:8px 4px; border-bottom:1px solid #f0f0f0; }
+                    table.status-table a { color:#1a5c9c; text-decoration:none; }
                     .tag { display:inline-block; padding:2px 8px; border-radius:3px; font-size:11px; font-weight:600; background:#eef0f4; color:#3a4556; }
                     .empty { color:#999; font-size:13px; font-style:italic; }
                     .footer { padding:20px 32px; font-size:11px; color:#999; }
@@ -206,7 +213,6 @@ public class DigestService {
         }
 
         StringBuilder html = new StringBuilder();
-        boolean anyTruncated = false;
         for (var entry : byDay.entrySet()) {
             List<UpcomingListing> dayListings = entry.getValue();
             html.append("<div class='day-header'>").append(entry.getKey()).append("</div>\n");
@@ -218,15 +224,12 @@ public class DigestService {
 
             int remaining = dayListings.size() - shown;
             if (remaining > 0) {
-                anyTruncated = true;
-                html.append("<div class='listing'><span class='empty'>+%d more auction%s this day</span></div>\n"
-                        .formatted(remaining, remaining == 1 ? "" : "s"));
+                // Linked right where the count is shown, rather than
+                // one summary link at the bottom of the whole section --
+                // each day's overflow is its own reason to click through.
+                html.append("<div class='listing'><span class='empty'>+%d more auction%s this day — <a href='%s'>view all →</a></span></div>\n"
+                        .formatted(remaining, remaining == 1 ? "" : "s", viewAllLinkHref));
             }
-        }
-
-        if (anyTruncated) {
-            html.append("<p style='margin-top:12px;'><a href='%s'>View all upcoming auctions →</a></p>\n"
-                    .formatted(viewAllLinkHref));
         }
 
         return html.toString();
@@ -308,9 +311,9 @@ public class DigestService {
                     : "date unknown";
 
             if (wasRemoved) {
-                removedRows.add(changeRow(first.address(), dateText, "<span class='tag'>%s</span>".formatted(escape("Removed"))));
+                removedRows.add(changeRow(first, dateText, "<span class='tag'>%s</span>".formatted(escape("Removed"))));
             } else if (wasNew) {
-                newRows.add(changeRow(first.address(), dateText, "<span class='tag'>%s</span>".formatted(escape("New"))));
+                newRows.add(changeRow(first, dateText, "<span class='tag'>%s</span>".formatted(escape("New"))));
             } else {
                 // Raw pass-through: event_type + new_value verbatim, no
                 // categorization beyond the bucket assignment below.
@@ -320,7 +323,7 @@ public class DigestService {
                         .map(DigestService::escape)
                         .map(l -> "<span class='tag'>%s</span>".formatted(l))
                         .collect(java.util.stream.Collectors.joining(" "));
-                String row = changeRow(first.address(), dateText, labels);
+                String row = changeRow(first, dateText, labels);
 
                 // An address can technically span more than one non-New/
                 // Removed event type in the same window (e.g. a
@@ -359,8 +362,35 @@ public class DigestService {
         return html.toString();
     }
 
-    private static String changeRow(String address, String dateText, String labels) {
-        return "<tr><td>%s</td><td>%s</td><td>%s</td></tr>\n".formatted(escape(address), dateText, labels);
+    private String changeRow(ChangedListing listing, String dateText, String labels) {
+        return "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n"
+                .formatted(escape(listing.address()), dateText, labels, changeLinkCell(listing));
+    }
+
+    /**
+     * "View listing" (always, if within window) plus "View map" (only
+     * if the property has coordinates) -- same link shapes as
+     * renderOneUpcoming(), reused here rather than duplicated logic
+     * diverging over time. Empty string (no link at all) if the
+     * auction is more than CHANGE_LINK_WINDOW_DAYS out, or dateless --
+     * a change on something months away, or with no date at all, isn't
+     * something to act on right now.
+     */
+    private String changeLinkCell(ChangedListing listing) {
+        if (listing.auctionDateTime() == null) {
+            return "";
+        }
+        boolean withinWindow = listing.auctionDateTime().isBefore(LocalDateTime.now().plusDays(NEW_LISTING_LINK_WINDOW_DAYS ));
+        if (!withinWindow) {
+            return "";
+        }
+
+        String mapLink = (listing.latitude() != null && listing.longitude() != null)
+                ? " &nbsp;·&nbsp; <a href='%s/auction-scout/?lat=%s&lng=%s&zoom=16'>View map →</a>"
+                .formatted(appBaseUrl, listing.latitude(), listing.longitude())
+                : "";
+
+        return "<a href='%s'>View listing →</a>%s".formatted(listing.sourceUrl(), mapLink);
     }
 
     /**

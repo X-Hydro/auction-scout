@@ -41,7 +41,8 @@ public class PropertyDigestRepository {
     public record ChangedListing(
             String address, String state, String eventType,
             String oldValue, String newValue, LocalDateTime auctionDateTime,
-            OffsetDateTime firstSeenAt, OffsetDateTime lastSeenAt) {}
+            OffsetDateTime firstSeenAt, OffsetDateTime lastSeenAt,
+            String sourceUrl, Double latitude, Double longitude) {}
 
     private final PropertiesDbConnectionManager dbManager;
 
@@ -138,7 +139,8 @@ public class PropertyDigestRepository {
 
         String sql = """
                 SELECT p.address_raw, p.state, p.first_seen_at, p.last_seen_at, a.auction_datetime,
-                       e.event_type, e.old_value, e.new_value
+                       e.event_type, e.old_value, e.new_value,
+                       a.source_url, p.latitude, p.longitude
                 FROM auction_events e
                 JOIN auctions a ON a.auction_id = e.auction_id
                 JOIN properties p ON p.property_id = a.property_id
@@ -165,7 +167,10 @@ public class PropertyDigestRepository {
                 rs.getString("new_value"),
                 parseLocal(rs.getString("auction_datetime")),
                 parseOffset(rs.getString("first_seen_at")),
-                parseOffset(rs.getString("last_seen_at"))
+                parseOffset(rs.getString("last_seen_at")),
+                rs.getString("source_url"),
+                (Double) rs.getObject("latitude"),
+                (Double) rs.getObject("longitude")
         ), args);
     }
 
