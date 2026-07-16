@@ -59,7 +59,8 @@ public class SubscriberRepository {
     public String markVerifiedAndIssueSessionToken(String email) {
         String token = generateToken();
         jdbc.update(
-                "UPDATE subscribers SET verified_at = ?, is_active = 1, session_token = ? WHERE email = ?",
+                "UPDATE subscribers SET verified_at = ?, is_active = 1, session_token = ?, " +
+                        "subscription_end_date = NULL WHERE email = ?",
                 System.currentTimeMillis(), token, email
         );
         return token;
@@ -100,6 +101,55 @@ public class SubscriberRepository {
                 "SELECT email FROM subscribers WHERE email = ? AND is_active = 1",
                 rs -> rs.next() ? Optional.of(rs.getString("email")) : Optional.empty(),
                 email
+        );
+    }
+
+    /**
+     * Whether weekly digest emails are paused for this subscriber. This
+     * is independent of is_active/cancellation -- a subscriber can stay
+     * fully active (still able to view /status and /preferences) while
+     * simply not wanting the email itself. Defaults true (matches the
+     * column's DB default) if the row can't be found, so a caller that
+     * already validated the session via findEmailBySessionToken never
+     * sees a false negative here.
+     */
+    public boolean getEmailAlertsEnabled(String email) {
+        Boolean enabled = jdbc.query(
+                "SELECT email_alerts_enabled FROM subscribers WHERE email = ?",
+                rs -> rs.next() ? rs.getBoolean("email_alerts_enabled") : null,
+                email
+        );
+        return enabled == null || enabled;
+    }
+
+    public void setEmailAlertsEnabled(String email, boolean enabled) {
+        jdbc.update(
+                "UPDATE subscribers SET email_alerts_enabled = ? WHERE email = ?",
+                enabled ? 1 : 0, email
+        );
+    }
+
+    /**
+     * Soft-deactivation for "cancel subscription". No Stripe integration
+     * yet, so this doesn't touch billing -- it flips is_active off (so
+     * every is_active-gated method in this class treats the account as
+     * gone immediately), revokes the session token, and records
+     * subscription_end_date. That column's javadoc already earmarks it
+     * for exactly this -- "once Stripe is added, this is where a paid
+     * period's end would be recorded" -- so a manual cancel today and a
+     * future Stripe webhook cancellation both land in the same place.
+     *
+     * To come back, they go through /register again. Since the row
+     * still exists, existsByEmail() short-circuits createUnverified(),
+     * and the next successful /verify flips is_active back to 1 and
+     * clears subscription_end_date via markVerifiedAndIssueSessionToken()
+     * -- reactivation is just "verify again", not a separate code path.
+     */
+    public void deactivate(String email) {
+        jdbc.update(
+                "UPDATE subscribers SET is_active = 0, session_token = NULL, subscription_end_date = ? " +
+                        "WHERE email = ?",
+                System.currentTimeMillis(), email
         );
     }
 

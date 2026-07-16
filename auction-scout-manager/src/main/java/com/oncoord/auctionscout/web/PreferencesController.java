@@ -26,7 +26,10 @@ public class PreferencesController {
         this.subscribers = subscribers;
     }
 
-    public record SetStatesRequest(List<String> states) {}
+    // emailAlertsEnabled defaults to true when omitted, so existing
+    // clients that only ever sent {states: [...]} keep working exactly
+    // as before instead of accidentally pausing alerts on every save.
+    public record SetStatesRequest(List<String> states, Boolean emailAlertsEnabled) {}
 
     @GetMapping("/preferences")
     public ResponseEntity<?> getPreferences(@RequestHeader("X-Session-Token") String sessionToken) {
@@ -37,7 +40,8 @@ public class PreferencesController {
 
         return ResponseEntity.ok(Map.of(
                 "email", email.get(),
-                "states", subscribers.getStates(email.get())
+                "states", subscribers.getStates(email.get()),
+                "emailAlertsEnabled", subscribers.getEmailAlertsEnabled(email.get())
         ));
     }
 
@@ -69,6 +73,12 @@ public class PreferencesController {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
 
-        return ResponseEntity.ok(Map.of("states", normalized));
+        boolean emailAlertsEnabled = req.emailAlertsEnabled() == null || req.emailAlertsEnabled();
+        subscribers.setEmailAlertsEnabled(email.get(), emailAlertsEnabled);
+
+        return ResponseEntity.ok(Map.of(
+                "states", normalized,
+                "emailAlertsEnabled", emailAlertsEnabled
+        ));
     }
 }

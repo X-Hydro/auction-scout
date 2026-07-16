@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS subscribers (
   -- stays NULL for the free period — once Stripe is added, this is
   -- where a paid period's end would be recorded.
   subscription_start_date INTEGER,
-  subscription_end_date INTEGER
+  subscription_end_date INTEGER,
+  email_alerts_enabled INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS idx_subscribers_session_token ON subscribers(session_token);
