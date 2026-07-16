@@ -28,7 +28,7 @@ public class CorsConfig implements WebMvcConfigurer {
                 // it with an OPTIONS request first — without this explicit
                 // allow, the preflight itself gets rejected and the real
                 // request never goes out at all.
-                .allowedHeaders("Content-Type", "X-Session-Token")
+                .allowedHeaders("Content-Type", "X-Session-Token", "X-Admin-Key")
                 .allowCredentials(false); // no cookies in play — bearer token only
     }
 }
