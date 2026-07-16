@@ -50,12 +50,24 @@ public class VerifyController {
         // bearer header on future requests) but with its own token,
         // since AuctionScout subscribers aren't oncoord-manager API
         // customers and the two credentials shouldn't be conflated.
-        String sessionToken = subscribers.markVerifiedAndIssueSessionToken(normalizedEmail);
+        Optional<String> sessionToken = subscribers.markVerifiedAndIssueSessionToken(normalizedEmail);
+
+        if (sessionToken.isEmpty()) {
+            // Token was valid, but no subscriber row exists for this
+            // email -- e.g. a digest test-send to an address that was
+            // never actually registered. Reporting success here would
+            // hand the client a session token that matches nothing,
+            // which fails one step later in a much more confusing way
+            // (looks logged in, then bounces back to "session expired").
+            return ResponseEntity.status(404).body(Map.of(
+                    "error", "No subscriber account found for this email."
+            ));
+        }
 
         return ResponseEntity.ok(Map.of(
                 "message", "Email verified.",
                 "email", normalizedEmail,
-                "sessionToken", sessionToken
+                "sessionToken", sessionToken.get()
         ));
     }
 }

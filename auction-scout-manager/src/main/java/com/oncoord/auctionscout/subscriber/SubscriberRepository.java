@@ -56,14 +56,24 @@ public class SubscriberRepository {
      * means an old, possibly-leaked link can't be replayed to recover a
      * still-valid session after a new one's been issued.
      */
-    public String markVerifiedAndIssueSessionToken(String email) {
+    /**
+     * Returns empty if no subscriber row matched the email -- e.g. a
+     * token issued for an address that was never actually registered
+     * (test-send to an arbitrary address, or a stale/tampered token).
+     * Previously this generated and returned a token unconditionally,
+     * even when the UPDATE affected zero rows -- the caller (verify())
+     * would then report success with a session token that was never
+     * actually persisted anywhere, which silently fails one step later
+     * when that token gets used and matches nothing.
+     */
+    public Optional<String> markVerifiedAndIssueSessionToken(String email) {
         String token = generateToken();
-        jdbc.update(
+        int rowsUpdated = jdbc.update(
                 "UPDATE subscribers SET verified_at = ?, is_active = 1, session_token = ?, " +
                         "subscription_end_date = NULL WHERE email = ?",
                 System.currentTimeMillis(), token, email
         );
-        return token;
+        return rowsUpdated > 0 ? Optional.of(token) : Optional.empty();
     }
 
     public Optional<String> findEmailBySessionToken(String sessionToken) {

@@ -4,9 +4,12 @@ import com.oncoord.auctionscout.properties.PropertyDigestRepository;
 import com.oncoord.auctionscout.properties.PropertyDigestRepository.ChangedListing;
 import com.oncoord.auctionscout.properties.PropertyDigestRepository.UpcomingListing;
 import com.oncoord.auctionscout.subscriber.SubscriberRepository;
+import com.oncoord.auth.common.TokenService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
@@ -23,10 +26,12 @@ import java.util.Locale;
  *
  * renderForSubscriber() is the entry point meant for reuse — both the
  * web-facing status page (via a Controller resolving a session token to
- * an email) and, later, the scheduled weekly email job (iterating over
- * every active subscriber directly, no HTTP involved at all) should
- * call this same method rather than duplicating the
- * "look up states, then render" logic in two places.
+ * an email) and the scheduled weekly email job call this same method
+ * rather than duplicating the "look up states, then render" logic in
+ * two places. The `truncate` flag is how those two callers differ:
+ * StatusController passes false (show everything — it's the page the
+ * truncated email points people back to), DigestSendService passes true
+ * (cap each section so the email stays short).
  */
 @Service
 public class DigestService {
@@ -42,27 +47,87 @@ public class DigestService {
     private static final int FAR_OUT_DAYS = 30;
     private static final int MIN_HISTORY_DAYS = 7;
 
+    // Email truncation caps — only applied when truncate=true. Chosen
+    // to keep the email short enough to skim; the web status page
+    // (truncate=false) always shows everything, since it's exactly
+    // where the "+N more" / "View all" links in the email point.
+    private static final int MAX_LISTINGS_PER_DAY = 5;
+    private static final int MAX_CHANGES_PER_BUCKET = 5;
+
+    // render() emits these literal placeholders instead of a real URL
+    // for the two "View all ..." links, rather than resolving them
+    // itself — it has no subscriber email to build a personalized
+    // auto-login link with, and no reason to (see renderForSubscriber(),
+    // the only place that knows both the email and whether this is
+    // going into an email vs the web page). Two distinct placeholders,
+    // not one shared: each digest link needs its own single-use token,
+    // since a magic-link token only verifies once — sharing one between
+    // both links would leave whichever gets clicked second showing
+    // "invalid or expired". A caller that invokes render() directly
+    // (e.g. a unit test with a bare state list) will see these literal
+    // strings in the output instead of a link if truncation ever
+    // actually kicks in for it — expected, not a bug, since only
+    // renderForSubscriber() fills them in.
+    private static final String UPCOMING_LINK_PLACEHOLDER = "{{STATUS_LINK_UPCOMING}}";
+    private static final String CHANGES_LINK_PLACEHOLDER = "{{STATUS_LINK_CHANGES}}";
+
     private final PropertyDigestRepository repository;
     private final SubscriberRepository subscribers;
+    private final TokenService tokenService;
     private final String appBaseUrl;
 
     public DigestService(PropertyDigestRepository repository,
                          SubscriberRepository subscribers,
+                         TokenService tokenService,
                          @Value("${auctionscout.app.base-url}") String appBaseUrl) {
         this.repository = repository;
         this.subscribers = subscribers;
+        this.tokenService = tokenService;
         this.appBaseUrl = appBaseUrl;
     }
 
     /**
-     * Looks up the subscriber's saved states and renders their digest.
-     * The one method both the web preview and (later) the scheduled
-     * email sender should call — neither should reach into
-     * SubscriberRepository directly and duplicate this lookup.
+     * Looks up the subscriber's saved states, renders their digest, then
+     * fills in the "View all ..." links render() left as placeholders.
+     * For truncate=true (email), each link gets its own fresh, single-
+     * use, 30-minute auto-login token pointing at post-login.html#...
+     * &redirect=/auction-scout/status.html — clicking it verifies and
+     * lands the subscriber straight on their status page, no CAPTCHA/
+     * re-registration hoop, matching the existing registration-link
+     * mechanism exactly (same TokenService, same /verify endpoint).
+     * For truncate=false (the web status page itself), the placeholders
+     * never actually appear in the rendered output in the first place
+     * (nothing is ever truncated there), so this only replaces them as
+     * a harmless no-op safety net, not a real path.
      */
-    public String renderForSubscriber(String email, OffsetDateTime changesSince) {
+    public String renderForSubscriber(String email, OffsetDateTime changesSince, boolean truncate) {
         List<String> states = subscribers.getStates(email);
-        return render(states, changesSince);
+        String html = render(states, changesSince, truncate);
+
+        if (!truncate) {
+            String plainUrl = appBaseUrl + "/auction-scout/status.html";
+            return html.replace(UPCOMING_LINK_PLACEHOLDER, plainUrl)
+                    .replace(CHANGES_LINK_PLACEHOLDER, plainUrl);
+        }
+
+        return html.replace(UPCOMING_LINK_PLACEHOLDER, buildAutoLoginLink(email))
+                .replace(CHANGES_LINK_PLACEHOLDER, buildAutoLoginLink(email));
+    }
+
+    /**
+     * Issues a fresh magic-link token (same TokenService, same
+     * login_tokens table as registration) and points it at
+     * post-login.html with a redirect back to status.html. The 30-
+     * minute expiry isn't enforced here — issue() itself has no
+     * concept of a TTL — it's enforced entirely by VerifyController
+     * when the token is consumed, same as every other magic link.
+     */
+    private String buildAutoLoginLink(String email) {
+        String rawToken = tokenService.issue(email);
+        return appBaseUrl + "/auction-scout/post-login.html#email="
+                + URLEncoder.encode(email, StandardCharsets.UTF_8)
+                + "&token=" + URLEncoder.encode(rawToken, StandardCharsets.UTF_8)
+                + "&redirect=" + URLEncoder.encode("/auction-scout/status.html", StandardCharsets.UTF_8);
     }
 
     /**
@@ -72,8 +137,12 @@ public class DigestService {
      *                      callers should pass something reasonable
      *                      like "7 days ago" rather than a real
      *                      per-subscriber value.
+     * @param truncate      true for email (cap each section at 5, with
+     *                      "+N more" / "View all" links back to the web
+     *                      status page); false to show everything (the
+     *                      web status page itself).
      */
-    public String render(List<String> states, OffsetDateTime changesSince) {
+    public String render(List<String> states, OffsetDateTime changesSince, boolean truncate) {
         LocalDateTime now = LocalDateTime.now();
         List<UpcomingListing> upcoming = repository.findUpcoming(states, now, now.plusDays(7));
         List<ChangedListing> changes = repository.findRecentChanges(states, changesSince);
@@ -110,14 +179,15 @@ public class DigestService {
                 </div></body></html>
                 """.formatted(
                 now.format(DateTimeFormatter.ofPattern("MMMM d, yyyy", Locale.US)),
-                renderUpcoming(upcoming),
-                renderChanges(changes)
+                renderUpcoming(upcoming, truncate, UPCOMING_LINK_PLACEHOLDER),
+                renderChanges(changes, truncate, CHANGES_LINK_PLACEHOLDER)
         );
     }
 
-    private String renderUpcoming(List<UpcomingListing> upcoming) {
-        StringBuilder html = new StringBuilder();
-        String currentDay = null;
+    private String renderUpcoming(List<UpcomingListing> upcoming, boolean truncate, String viewAllLinkHref) {
+        // Group by day first so the per-day cap applies within each day,
+        // not across the whole 7-day window.
+        java.util.Map<String, List<UpcomingListing>> byDay = new java.util.LinkedHashMap<>();
         for (UpcomingListing listing : upcoming) {
             // Unparseable auction_datetime -> no safe day/time to group
             // under, so it's skipped from this view. If that's hiding
@@ -127,34 +197,59 @@ public class DigestService {
             if (listing.auctionDateTime() == null) {
                 continue;
             }
-
             String day = listing.auctionDateTime().format(DAY_HEADER);
-            if (!day.equals(currentDay)) {
-                currentDay = day;
-                html.append("<div class='day-header'>").append(day).append("</div>\n");
+            byDay.computeIfAbsent(day, k -> new java.util.ArrayList<>()).add(listing);
+        }
+
+        if (byDay.isEmpty()) {
+            return "<p class='empty'>No auctions in the next 7 days for your selected states.</p>";
+        }
+
+        StringBuilder html = new StringBuilder();
+        boolean anyTruncated = false;
+        for (var entry : byDay.entrySet()) {
+            List<UpcomingListing> dayListings = entry.getValue();
+            html.append("<div class='day-header'>").append(entry.getKey()).append("</div>\n");
+
+            int shown = truncate ? Math.min(MAX_LISTINGS_PER_DAY, dayListings.size()) : dayListings.size();
+            for (int i = 0; i < shown; i++) {
+                html.append(renderOneUpcoming(dayListings.get(i)));
             }
 
-            String mapLink = (listing.latitude() != null && listing.longitude() != null)
-                    ? " &nbsp;·&nbsp; <a href='%s/auction-scout/?lat=%s&lng=%s&zoom=16'>View map →</a>"
-                    .formatted(appBaseUrl, listing.latitude(), listing.longitude())
-                    : "";
-
-            html.append("""
-                    <div class='listing'><div class='addr'>%s</div><div class='meta'>%s</div>
-                    <a href='%s'>View listing →</a>%s</div>
-                    """.formatted(
-                    escape(listing.address()),
-                    listing.auctionDateTime().format(LISTING_META),
-                    listing.sourceUrl(),
-                    mapLink
-            ));
+            int remaining = dayListings.size() - shown;
+            if (remaining > 0) {
+                anyTruncated = true;
+                html.append("<div class='listing'><span class='empty'>+%d more auction%s this day</span></div>\n"
+                        .formatted(remaining, remaining == 1 ? "" : "s"));
+            }
         }
-        return html.isEmpty()
-                ? "<p class='empty'>No auctions in the next 7 days for your selected states.</p>"
-                : html.toString();
+
+        if (anyTruncated) {
+            html.append("<p style='margin-top:12px;'><a href='%s'>View all upcoming auctions →</a></p>\n"
+                    .formatted(viewAllLinkHref));
+        }
+
+        return html.toString();
     }
 
-    private String renderChanges(List<ChangedListing> changes) {
+    private String renderOneUpcoming(UpcomingListing listing) {
+        String mapLink = (listing.latitude() != null && listing.longitude() != null)
+                ? " &nbsp;·&nbsp; <a href='%s/auction-scout/?lat=%s&lng=%s&zoom=16'>View map →</a>"
+                .formatted(appBaseUrl, listing.latitude(), listing.longitude())
+                : "";
+
+        return """
+                <div class='listing'><div class='addr'>%s</div><div class='meta'>%s</div>
+                <a href='%s'>View listing →</a>%s</div>
+                """.formatted(
+                escape(listing.address()),
+                listing.auctionDateTime().format(LISTING_META),
+                listing.sourceUrl(),
+                mapLink
+        );
+    }
+
+    private String renderChanges(List<ChangedListing> changes, boolean truncate, String viewAllLinkHref) {
         if (changes.isEmpty()) {
             return "<p class='empty'>No status changes to report this week.</p>";
         }
@@ -171,8 +266,16 @@ public class DigestService {
             byAddress.computeIfAbsent(change.address(), k -> new java.util.ArrayList<>()).add(change);
         }
 
-        StringBuilder rows = new StringBuilder("<table class='status-table'>\n");
-        boolean anyRows = false;
+        // Each address is bucketed into exactly one of these four
+        // categories, so "show first 5, +N more" can be applied per
+        // category rather than to one big mixed list. This is also the
+        // display order: New first, then how things are shifting
+        // (Date/Status), Removed last.
+        List<String> newRows = new java.util.ArrayList<>();
+        List<String> dateChangeRows = new java.util.ArrayList<>();
+        List<String> statusChangeRows = new java.util.ArrayList<>();
+        List<String> removedRows = new java.util.ArrayList<>();
+
         for (List<ChangedListing> group : byAddress.values()) {
             ChangedListing first = group.get(0);
             boolean wasNew = group.stream().anyMatch(c -> "first_seen".equals(c.eventType()));
@@ -189,26 +292,8 @@ public class DigestService {
 
             // A brand-new listing that's both far out (>30 days) and
             // hasn't accumulated at least 7 days of observed history yet
-            // (last_seen_at is still within 7 days of first_seen_at)
-            // matches the profile of listings that show up and vanish
-            // within days -- suppress the "New" announcement for these.
-            // This is a broader bar than "never reconfirmed at all": a
-            // listing rescraped once or twice within just a couple days
-            // still hasn't demonstrated much, so it's held to the same
-            // standard as one that's been seen only once. Using actual
-            // observed-history length rather than a fixed calendar cutoff
-            // off first_seen_at is deliberately conservative: since
-            // scrapes run frequently, most real listings accumulate 7
-            // days of history quickly and pass through untouched; only
-            // genuinely short-lived listings get caught. NOTE: first_seen
-            // only fires once and the digest window only looks back 7
-            // days, so a listing suppressed here does NOT get
-            // re-announced later once it accumulates enough history -- it
-            // simply never gets a "New" tag at all if that happens after
-            // this digest already ran. Accepted tradeoff per explicit
-            // decision; revisit if under-reporting becomes a problem
-            // (would need a persisted "already announced" flag instead
-            // of relying solely on the one-shot first_seen event).
+            // is suppressed from the "New" announcement — see FAR_OUT_DAYS
+            // comment above for the full reasoning.
             if (wasNew && !wasRemoved && first.auctionDateTime() != null
                     && first.firstSeenAt() != null && first.lastSeenAt() != null) {
                 boolean farOut = first.auctionDateTime().isAfter(LocalDateTime.now().plusDays(FAR_OUT_DAYS));
@@ -222,47 +307,90 @@ public class DigestService {
                     ? first.auctionDateTime().format(LISTING_META)
                     : "date unknown";
 
-            // Raw pass-through: event_type + new_value verbatim, no
-            // categorization -- except two hardcoded label overrides.
-            // "first_seen" -> "New" reads better than the raw name.
-            // "disappeared" -> "Removed": the DB/internal event_type
-            // stays "disappeared", but nothing subscriber-facing should
-            // say that -- we don't actually know what happened (sold,
-            // cancelled, a scraper miss are all indistinguishable from
-            // this event alone), and "Removed" is the neutral, external
-            // term for "no longer tracked" without implying a cause.
-            String labels;
             if (wasRemoved) {
-                // "Removed" wins outright over any other event in the
-                // same window (e.g. a status_change a few days earlier)
-                // -- avoids a contradictory-looking combination of tags.
-                labels = "<span class='tag'>%s</span>".formatted(escape("Removed"));
+                removedRows.add(changeRow(first.address(), dateText, "<span class='tag'>%s</span>".formatted(escape("Removed"))));
             } else if (wasNew) {
-                // "New" wins outright too, same reasoning as "Removed"
-                // above: if the subscriber is seeing this listing for
-                // the first time, a status_change/date_change from
-                // earlier in the same window has no "before" state for
-                // them to have seen -- "date_change: 2026-08-03T12:00:00
-                // New" is noise, not information. Just "New".
-                labels = "<span class='tag'>%s</span>".formatted(escape("New"));
+                newRows.add(changeRow(first.address(), dateText, "<span class='tag'>%s</span>".formatted(escape("New"))));
             } else {
-                labels = group.stream()
+                // Raw pass-through: event_type + new_value verbatim, no
+                // categorization beyond the bucket assignment below.
+                String labels = group.stream()
                         .map(change -> "%s: %s".formatted(change.eventType(), nullToDash(change.newValue())))
                         .distinct()
                         .map(DigestService::escape)
                         .map(l -> "<span class='tag'>%s</span>".formatted(l))
                         .collect(java.util.stream.Collectors.joining(" "));
-            }
+                String row = changeRow(first.address(), dateText, labels);
 
-            rows.append("<tr><td>%s</td><td>%s</td><td>%s</td></tr>\n".formatted(
-                    escape(first.address()), dateText, labels));
-            anyRows = true;
+                // An address can technically span more than one non-New/
+                // Removed event type in the same window (e.g. a
+                // postponement that also moved the date). date_change
+                // wins the bucket assignment when both are present --
+                // deterministic, and keeps a single address from
+                // appearing in two sections at once.
+                boolean hasDateChange = group.stream().anyMatch(c -> "date_change".equals(c.eventType()));
+                if (hasDateChange) {
+                    dateChangeRows.add(row);
+                } else {
+                    // status_change (postponed/canceled/sold) and
+                    // price_change both land here — price_change is rare
+                    // enough not to warrant its own section.
+                    statusChangeRows.add(row);
+                }
+            }
         }
-        if (!anyRows) {
+
+        StringBuilder html = new StringBuilder();
+        boolean anyTruncated = false;
+        anyTruncated |= appendChangeSection(html, "New Listings", newRows, truncate);
+        anyTruncated |= appendChangeSection(html, "Date Changes", dateChangeRows, truncate);
+        anyTruncated |= appendChangeSection(html, "Status Changes", statusChangeRows, truncate);
+        anyTruncated |= appendChangeSection(html, "Removed", removedRows, truncate);
+
+        if (html.isEmpty()) {
             return "<p class='empty'>No status changes to report this week.</p>";
         }
-        rows.append("</table>");
-        return rows.toString();
+
+        if (anyTruncated) {
+            html.append("<p style='margin-top:12px;'><a href='%s'>View all changes →</a></p>\n"
+                    .formatted(viewAllLinkHref));
+        }
+
+        return html.toString();
+    }
+
+    private static String changeRow(String address, String dateText, String labels) {
+        return "<tr><td>%s</td><td>%s</td><td>%s</td></tr>\n".formatted(escape(address), dateText, labels);
+    }
+
+    /**
+     * Renders one change subsection (mini heading + table), capped at
+     * MAX_CHANGES_PER_BUCKET rows when truncate is true, with a "+N
+     * more" note appended if any rows were cut. Renders nothing (and
+     * returns false) if rows is empty — no point in a heading over an
+     * empty table. Returns whether this section was actually truncated,
+     * so the caller knows whether to show the overall "View all" link.
+     */
+    private boolean appendChangeSection(StringBuilder html, String heading, List<String> rows, boolean truncate) {
+        if (rows.isEmpty()) {
+            return false;
+        }
+
+        int shown = truncate ? Math.min(MAX_CHANGES_PER_BUCKET, rows.size()) : rows.size();
+        int remaining = rows.size() - shown;
+
+        html.append("<div class='day-header'>").append(escape(heading)).append("</div>\n");
+        html.append("<table class='status-table'>\n");
+        for (int i = 0; i < shown; i++) {
+            html.append(rows.get(i));
+        }
+        html.append("</table>\n");
+
+        if (remaining > 0) {
+            html.append("<p class='empty'>+%d more</p>\n".formatted(remaining));
+        }
+
+        return remaining > 0;
     }
 
     private static String nullToDash(String s) {

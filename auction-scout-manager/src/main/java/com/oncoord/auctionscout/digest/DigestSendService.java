@@ -88,7 +88,7 @@ public class DigestSendService {
         // as StatusController: real per-subscriber "last digest sent"
         // tracking isn't built, this notification log could become that
         // source later, but isn't wired up for it yet.
-        String html = digestService.renderForSubscriber(email, OffsetDateTime.now().minusDays(7));
+        String html = digestService.renderForSubscriber(email, OffsetDateTime.now().minusDays(7), true);
         mailer.send(email, SUBJECT, html);
 
         Integer subscriberId = subscribers.findIdByEmail(email).orElse(null);

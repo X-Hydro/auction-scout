@@ -116,7 +116,8 @@ class DigestServiceTest {
 
         String html = digestService.render(
                 List.of("NH"),
-                OffsetDateTime.parse("2026-07-01T00:00:00+00:00")
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
         );
 
         assertTrue(html.contains("42 Elm Street, Nashua, NH"),
@@ -150,7 +151,8 @@ class DigestServiceTest {
         // Subscriber only watches MA, not NH -- should see nothing.
         String html = digestService.render(
                 List.of("MA"),
-                OffsetDateTime.parse("2026-07-01T00:00:00+00:00")
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
         );
 
         assertFalse(html.contains("10 Maple Ave, Manchester, NH"));
@@ -178,7 +180,8 @@ class DigestServiceTest {
 
         String html = digestService.render(
                 List.of("NH"),
-                OffsetDateTime.now().minusYears(1) // no events inserted, so this just needs to not matter
+                OffsetDateTime.now().minusYears(1), // no events inserted, so this just needs to not matter
+                false
         );
 
         assertTrue(html.contains("5 Birch Lane, Concord, NH"),
@@ -211,7 +214,8 @@ class DigestServiceTest {
 
         String html = digestService.render(
                 List.of("NH"),
-                OffsetDateTime.parse("2026-07-01T00:00:00+00:00")
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
         );
 
         assertTrue(html.contains("8 Cedar Court, Manchester, NH"));
@@ -232,7 +236,8 @@ class DigestServiceTest {
 
         String html = digestService.render(
                 List.of("NH"),
-                OffsetDateTime.parse("2026-07-01T00:00:00+00:00")
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
         );
 
         assertTrue(html.contains("14 Willow Way, Salem, NH"));
@@ -258,7 +263,8 @@ class DigestServiceTest {
 
         String html = digestService.render(
                 List.of("NH"),
-                OffsetDateTime.parse("2026-07-01T00:00:00+00:00")
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
         );
 
         // Appeared and vanished within the same digest window -- the
