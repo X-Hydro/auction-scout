@@ -104,6 +104,29 @@ public class SubscriberRepository {
         );
     }
 
+    public Optional<Integer> findIdByEmail(String email) {
+        return jdbc.query(
+                "SELECT id FROM subscribers WHERE email = ?",
+                rs -> rs.next() ? Optional.of(rs.getInt("id")) : Optional.empty(),
+                email
+        );
+    }
+
+    public record ActiveSubscriber(int id, String email) {}
+
+    /**
+     * Who the weekly scheduler should mail. is_active excludes
+     * unverified and cancelled subscribers (same flag, see
+     * deactivate()'s javadoc); email_alerts_enabled excludes anyone
+     * who's paused emails without cancelling outright.
+     */
+    public List<ActiveSubscriber> findActiveWithAlertsEnabled() {
+        return jdbc.query(
+                "SELECT id, email FROM subscribers WHERE is_active = 1 AND email_alerts_enabled = 1",
+                (rs, rowNum) -> new ActiveSubscriber(rs.getInt("id"), rs.getString("email"))
+        );
+    }
+
     /**
      * Whether weekly digest emails are paused for this subscriber. This
      * is independent of is_active/cancellation -- a subscriber can stay

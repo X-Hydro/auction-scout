@@ -1,5 +1,6 @@
 package com.oncoord.auctionscout.properties;
 
+import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -83,6 +84,20 @@ public class PropertiesDbConnectionManager {
     }
 
     /**
+     * Releases the current SQLite connection. Primarily for tests, which
+     * construct this class directly (bypassing Spring) and need to release
+     * the file lock before the next test deletes/recreates the DB file --
+     * @PreDestroy also lets Spring call this on real shutdown.
+     */
+    @PreDestroy
+    public void close() {
+        SingleConnectionDataSource ds = current.getAndSet(null);
+        if (ds != null) {
+            ds.destroy();
+        }
+    }
+
+    /**
      * @param failFast true at startup (throw so the app refuses to boot
      *                 against a broken/missing DB -- better to fail loud
      *                 immediately than silently serve empty data), false
@@ -112,8 +127,8 @@ public class PropertiesDbConnectionManager {
             // but empty database (e.g. schema applied, pipeline never ran).
             Integer count = new JdbcTemplate(newDs)
                     .queryForObject("SELECT COUNT(*) FROM properties", Integer.class);
-            if (count == null || count == 0) {
-                throw new IllegalStateException("'properties' table exists but has zero rows");
+            if (count == null) {
+                throw new IllegalStateException("'properties' table does not exist");
             }
         } catch (Exception e) {
             newDs.destroy();

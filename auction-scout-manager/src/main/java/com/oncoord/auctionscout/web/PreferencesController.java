@@ -1,5 +1,6 @@
 package com.oncoord.auctionscout.web;
 
+import com.oncoord.auctionscout.digest.DigestSendService;
 import com.oncoord.auctionscout.subscriber.SubscriberRepository;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -21,9 +22,11 @@ public class PreferencesController {
     private static final Set<String> VALID_STATES = Set.of("ME", "NH", "VT", "MA", "RI", "CT");
 
     private final SubscriberRepository subscribers;
+    private final DigestSendService digestSendService;
 
-    public PreferencesController(SubscriberRepository subscribers) {
+    public PreferencesController(SubscriberRepository subscribers, DigestSendService digestSendService) {
         this.subscribers = subscribers;
+        this.digestSendService = digestSendService;
     }
 
     // emailAlertsEnabled defaults to true when omitted, so existing
@@ -75,6 +78,14 @@ public class PreferencesController {
 
         boolean emailAlertsEnabled = req.emailAlertsEnabled() == null || req.emailAlertsEnabled();
         subscribers.setEmailAlertsEnabled(email.get(), emailAlertsEnabled);
+
+        // Welcome email: only makes sense if they actually want alerts
+        // and have picked at least one state to report on. Safe to call
+        // on every save — sendWelcomeIfFirstTime() is itself a no-op
+        // after the first time it actually sends (see its javadoc).
+        if (emailAlertsEnabled && !normalized.isEmpty()) {
+            digestSendService.sendWelcomeIfFirstTime(email.get());
+        }
 
         return ResponseEntity.ok(Map.of(
                 "states", normalized,

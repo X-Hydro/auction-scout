@@ -1,5 +1,6 @@
 package com.oncoord.auctionscout.digest;
 
+import com.oncoord.auctionscout.properties.PropertiesDbConnectionManager;
 import com.oncoord.auctionscout.properties.PropertyDigestRepository;
 import com.oncoord.auctionscout.testsupport.PropertyDigestTestData;
 import org.junit.jupiter.api.AfterEach;
@@ -57,6 +58,8 @@ class DigestServiceTest {
     private SingleConnectionDataSource dataSource;
     private PropertyDigestTestData testData;
     private DigestService digestService;
+    private PropertiesDbConnectionManager dbManager;
+
 
     @BeforeEach
     void setUp(TestInfo testInfo) throws IOException, SQLException {
@@ -72,7 +75,7 @@ class DigestServiceTest {
             // uses. It lives one level up from this module's working
             // directory, as a sibling of auction-scout-manager/ (not
             // inside it), so it can't be loaded via ClassPathResource.
-            Path schemaPath = Path.of("../schema.sql");
+            Path schemaPath = Path.of("../auction-scout-data/schema.sql");
             if (!Files.exists(schemaPath)) {
                 throw new IllegalStateException(
                         "Expected schema.sql at " + schemaPath.toAbsolutePath()
@@ -84,13 +87,15 @@ class DigestServiceTest {
         }
 
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        dbManager = new PropertiesDbConnectionManager(DB_PATH.toString());
         testData = new PropertyDigestTestData(jdbc);
-        PropertyDigestRepository repository = new PropertyDigestRepository(jdbc);
+        PropertyDigestRepository repository = new PropertyDigestRepository(dbManager);
         digestService = new DigestService(repository, null, "https://oncoord.com");
     }
 
     @AfterEach
     void closeConnection() {
+        dbManager.close();
         dataSource.destroy();
         // DB file deliberately left on disk for inspection -- see class javadoc.
     }

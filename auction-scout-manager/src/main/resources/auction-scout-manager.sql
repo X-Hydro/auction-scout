@@ -36,3 +36,14 @@ CREATE TABLE IF NOT EXISTS subscriber_states (
   PRIMARY KEY (subscriber_id, state),
   FOREIGN KEY (subscriber_id) REFERENCES subscribers(id)
 );
+
+CREATE TABLE IF NOT EXISTS email_notifications (
+    notification_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subscriber_id INTEGER REFERENCES subscribers(id),
+    email TEXT NOT NULL,
+    notification_type TEXT NOT NULL, -- 'welcome' | 'weekly' | 'test'
+    sent_at INTEGER NOT NULL
+    );
+
+CREATE INDEX IF NOT EXISTS idx_email_notifications_email_sent_at
+    ON email_notifications(email, sent_at);
