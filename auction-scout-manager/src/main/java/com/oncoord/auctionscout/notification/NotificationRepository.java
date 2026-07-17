@@ -56,6 +56,23 @@ public class NotificationRepository {
         return count != null && count > 0;
     }
 
+    /**
+     * Whether this email received ANY notification (regardless of
+     * type) strictly before the given point in time. Used to gate
+     * whether a subscriber can be told a listing was "Removed" — if
+     * nothing went out to them before the listing disappeared, they
+     * never had a chance to see it in the first place, so announcing
+     * its removal would be telling them about something they never
+     * knew existed. See DigestService.renderChanges().
+     */
+    public boolean hasSentBefore(String email, long beforeEpochMillis) {
+        Integer count = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM email_notifications WHERE email = ? AND sent_at < ?",
+                Integer.class, email, beforeEpochMillis
+        );
+        return count != null && count > 0;
+    }
+
     public void recordSent(String email, Integer subscriberId, String notificationType) {
         jdbc.update(
                 "INSERT INTO email_notifications (subscriber_id, email, notification_type, sent_at) " +

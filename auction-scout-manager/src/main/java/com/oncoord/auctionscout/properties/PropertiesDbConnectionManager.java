@@ -68,6 +68,7 @@ public class PropertiesDbConnectionManager {
 
     @Scheduled(fixedRate = POLL_INTERVAL_MS)
     public void checkForUpdates() {
+        //log.info("checkForUpdates checking for a new database file");
         File file = new File(dbPath);
         if (!file.exists()) {
             log.warn("Properties DB not found at {} -- keeping existing connection", dbPath);

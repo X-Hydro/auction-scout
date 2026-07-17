@@ -1,5 +1,6 @@
 package com.oncoord.auctionscout.digest;
 
+import com.oncoord.auctionscout.notification.NotificationRepository;
 import com.oncoord.auctionscout.properties.PropertyDigestRepository;
 import com.oncoord.auctionscout.properties.PropertyDigestRepository.ChangedListing;
 import com.oncoord.auctionscout.properties.PropertyDigestRepository.UpcomingListing;
@@ -60,6 +61,17 @@ public class DigestService {
     // extra link is noise there. Tune here if the cutoff needs adjusting.
     private static final int NEW_LISTING_LINK_WINDOW_DAYS  = 21;
 
+    // status_change values seen in the wild that mean the auction won't
+    // happen as listed (sold, cancelled, transferred to a third-party
+    // sale) -- treated the same as a structural 'disappeared' event: same
+    // "Removed" bucket, same notification-history gate (see
+    // isRemovalEvent). Substring match, case-insensitive, rather than an
+    // exact-value list, since the Python pipeline's status text isn't a
+    // controlled vocabulary (see PropertyDigestRepository's javadoc) and
+    // spelling already varies in practice (e.g. cancelled/canceled).
+    private static final List<String> TERMINAL_STATUS_KEYWORDS =
+            List.of("cancel", "sold", "third party", "3rd party");
+
     // render() emits these literal placeholders instead of a real URL
     // for the two "View all ..." links, rather than resolving them
     // itself — it has no subscriber email to build a personalized
@@ -79,15 +91,18 @@ public class DigestService {
 
     private final PropertyDigestRepository repository;
     private final SubscriberRepository subscribers;
+    private final NotificationRepository notifications;
     private final TokenService tokenService;
     private final String appBaseUrl;
 
     public DigestService(PropertyDigestRepository repository,
                          SubscriberRepository subscribers,
+                         NotificationRepository notifications,
                          TokenService tokenService,
                          @Value("${auctionscout.app.base-url}") String appBaseUrl) {
         this.repository = repository;
         this.subscribers = subscribers;
+        this.notifications = notifications;
         this.tokenService = tokenService;
         this.appBaseUrl = appBaseUrl;
     }
@@ -108,7 +123,7 @@ public class DigestService {
      */
     public String renderForSubscriber(String email, OffsetDateTime changesSince, boolean truncate) {
         List<String> states = subscribers.getStates(email);
-        String html = render(states, changesSince, truncate);
+        String html = render(email, states, changesSince, truncate);
 
         if (!truncate) {
             String plainUrl = appBaseUrl + "/auction-scout/status.html";
@@ -149,6 +164,18 @@ public class DigestService {
      *                      web status page itself).
      */
     public String render(List<String> states, OffsetDateTime changesSince, boolean truncate) {
+        return render(null, states, changesSince, truncate);
+    }
+
+    /**
+     * @param email  the subscriber this digest is for, or null for a
+     *               bare call with no subscriber context (e.g. a unit
+     *               test). Used solely to gate the "Removed" bucket —
+     *               see renderChanges() — against NotificationRepository;
+     *               a null email means "never emailed", so nothing is
+     *               ever shown as Removed for that call.
+     */
+    public String render(String email, List<String> states, OffsetDateTime changesSince, boolean truncate) {
         LocalDateTime now = LocalDateTime.now();
         List<UpcomingListing> upcoming = repository.findUpcoming(states, now, now.plusDays(7));
         List<ChangedListing> changes = repository.findRecentChanges(states, changesSince);
@@ -187,7 +214,7 @@ public class DigestService {
                 """.formatted(
                 now.format(DateTimeFormatter.ofPattern("MMMM d, yyyy", Locale.US)),
                 renderUpcoming(upcoming, truncate, UPCOMING_LINK_PLACEHOLDER),
-                renderChanges(changes, truncate, CHANGES_LINK_PLACEHOLDER)
+                renderChanges(changes, truncate, CHANGES_LINK_PLACEHOLDER, email)
         );
     }
 
@@ -254,7 +281,7 @@ public class DigestService {
         );
     }
 
-    private String renderChanges(List<ChangedListing> changes, boolean truncate, String viewAllLinkHref) {
+    private String renderChanges(List<ChangedListing> changes, boolean truncate, String viewAllLinkHref, String email) {
         if (changes.isEmpty()) {
             return "<p class='empty'>No status changes to report this week.</p>";
         }
@@ -284,7 +311,29 @@ public class DigestService {
         for (List<ChangedListing> group : byAddress.values()) {
             ChangedListing first = group.get(0);
             boolean wasNew = group.stream().anyMatch(c -> "first_seen".equals(c.eventType()));
-            boolean wasRemoved = group.stream().anyMatch(c -> "disappeared".equals(c.eventType()));
+            // A structural 'disappeared' event OR a status_change whose
+            // new value indicates the auction is over (sold/cancelled/
+            // third-party sale) both mean the same thing to a
+            // subscriber -- see isRemovalEvent.
+            boolean wasRemoved = group.stream().anyMatch(DigestService::isRemovalEvent);
+            // A property can be first_seen AND have a date_change/
+            // price_change land in the same rolling changesSince window
+            // -- e.g. a listing that's "new" to this digest but whose
+            // date was also revised before the subscriber ever saw the
+            // original one. That's strictly more informative than a
+            // bare "New" tag, so it wins the bucket assignment -- same
+            // precedence idea as date_change winning over price_change
+            // below, just one level up. Only date_change/price_change
+            // count here -- status_change is either folded into
+            // wasRemoved above (terminal) or suppressed as noise (see
+            // isNoiseStatusChange), so it never justifies bumping a
+            // group out of the plain "New" bucket on its own. Once
+            // per-subscriber changesSince tracking exists (see render()
+            // javadoc), a first_seen+date_change combo like this should
+            // become rare, since a subscriber's very next digest after
+            // "New" would have its own fresh changesSince cutoff.
+            boolean hasOtherChangeType = group.stream().anyMatch(c ->
+                    "date_change".equals(c.eventType()) || "price_change".equals(c.eventType()));
 
             // Appeared and vanished within the same digest window: the
             // subscriber never had a real chance to see this listing, so
@@ -298,8 +347,12 @@ public class DigestService {
             // A brand-new listing that's both far out (>30 days) and
             // hasn't accumulated at least 7 days of observed history yet
             // is suppressed from the "New" announcement — see FAR_OUT_DAYS
-            // comment above for the full reasoning.
-            if (wasNew && !wasRemoved && first.auctionDateTime() != null
+            // comment above for the full reasoning. Only applies to a pure
+            // "New" row -- if hasOtherChangeType is also true, this row
+            // is about to carry real change info (date/status/price), and
+            // that shouldn't be thrown away just because the underlying
+            // property also happens to be new and far out.
+            if (wasNew && !wasRemoved && !hasOtherChangeType && first.auctionDateTime() != null
                     && first.firstSeenAt() != null && first.lastSeenAt() != null) {
                 boolean farOut = first.auctionDateTime().isAfter(LocalDateTime.now().plusDays(FAR_OUT_DAYS));
                 boolean notEnoughHistoryYet = first.lastSeenAt().isBefore(first.firstSeenAt().plusDays(MIN_HISTORY_DAYS));
@@ -313,18 +366,62 @@ public class DigestService {
                     : "date unknown";
 
             if (wasRemoved) {
+                // Only announce a Removed listing if this subscriber
+                // actually had a chance to see it before it vanished --
+                // i.e. some email went out to them before the
+                // "disappeared" event was detected. Otherwise this is
+                // the same kind of noise as the wasNew&&wasRemoved skip
+                // above: telling someone something was removed when they
+                // never knew it existed. A null email (bare render()
+                // call, no subscriber context) is treated the same as
+                // "never emailed" -- nothing shown as Removed.
+                OffsetDateTime disappearedAt = group.stream()
+                        .filter(DigestService::isRemovalEvent)
+                        .map(ChangedListing::detectedAt)
+                        .filter(java.util.Objects::nonNull)
+                        .max(OffsetDateTime::compareTo)
+                        .orElse(null);
+                boolean everEmailed = email != null && disappearedAt != null
+                        && notifications.hasSentBefore(email, disappearedAt.toInstant().toEpochMilli());
+                if (!everEmailed) {
+                    continue;
+                }
                 removedRows.add(changeRow(first, dateText, "<span class='tag'>%s</span>".formatted(escape("Removed")), "Removed"));
-            } else if (wasNew) {
+            } else if (wasNew && !hasOtherChangeType) {
                 newRows.add(changeRow(first, dateText, "<span class='tag'>%s</span>".formatted(escape("New")), "New"));
             } else {
-                // Raw pass-through: event_type + new_value verbatim, no
-                // categorization beyond the bucket assignment below.
+                // Raw pass-through for whatever's left (price_change, or
+                // any event type not yet recognized by isRemovalEvent/
+                // isNoiseStatusChange above) -- date_change gets special
+                // formatting (see formatChangeLabel), everything else is
+                // still shown as "event_type: new_value" verbatim rather
+                // than guessed at, per the "dumb frontend" approach (see
+                // PropertyDigestRepository's javadoc). first_seen and
+                // removal events are excluded -- handled by wasNew/
+                // wasRemoved above -- and a noise status_change (e.g.
+                // "active", "available - contact auctioneer") is
+                // excluded entirely rather than shown raw, since it's
+                // just the property cycling through the auction house's
+                // own listing states, not something actionable.
                 String labels = group.stream()
-                        .map(change -> "%s: %s".formatted(change.eventType(), nullToDash(change.newValue())))
+                        .filter(change -> !"first_seen".equals(change.eventType())
+                                && !isRemovalEvent(change)
+                                && !isNoiseStatusChange(change))
+                        .map(DigestService::formatChangeLabel)
                         .distinct()
-                        .map(DigestService::escape)
                         .map(l -> "<span class='tag'>%s</span>".formatted(l))
                         .collect(java.util.stream.Collectors.joining(" "));
+                if (wasNew) {
+                    labels = "<span class='tag'>%s</span> ".formatted(escape("New")) + labels;
+                }
+                if (labels.isBlank()) {
+                    // Nothing left to show after filtering out noise --
+                    // e.g. the only event in this window was a
+                    // non-terminal status_change. Skip the row entirely
+                    // rather than rendering an empty change with no
+                    // explanation.
+                    continue;
+                }
                 // An address can technically span more than one non-New/
                 // Removed event type in the same window (e.g. a
                 // postponement that also moved the date). date_change
@@ -337,9 +434,9 @@ public class DigestService {
                 if (hasDateChange) {
                     dateChangeRows.add(row);
                 } else {
-                    // status_change (postponed/canceled/sold) and
-                    // price_change both land here — price_change is rare
-                    // enough not to warrant its own section.
+                    // Only price_change (and any not-yet-recognized event
+                    // type) reach here now -- terminal status_change is
+                    // Removed, noise status_change is suppressed above.
                     statusChangeRows.add(row);
                 }
             }
@@ -362,6 +459,67 @@ public class DigestService {
         }
 
         return html.toString();
+    }
+
+    /**
+     * True for both a structural 'disappeared' event and a status_change
+     * whose new value indicates the auction is over (sold/cancelled/
+     * third-party sale) -- subscriber-facing rendering treats these
+     * identically as "Removed", including the same notification-history
+     * gate in the wasRemoved branch above.
+     */
+    private static boolean isRemovalEvent(ChangedListing c) {
+        return "disappeared".equals(c.eventType())
+                || ("status_change".equals(c.eventType()) && isTerminalStatus(c.newValue()));
+    }
+
+    /**
+     * status_change values that are neither terminal (see
+     * isRemovalEvent) nor otherwise informative -- e.g. "active" or
+     * "available - contact auctioneer" just reflect the property
+     * cycling through the auction house's own listing states, not
+     * something a subscriber needs to act on. Excluded from the digest
+     * entirely rather than shown as a raw, hard-to-interpret tag.
+     */
+    private static boolean isNoiseStatusChange(ChangedListing c) {
+        return "status_change".equals(c.eventType()) && !isTerminalStatus(c.newValue());
+    }
+
+    private static boolean isTerminalStatus(String rawStatus) {
+        if (rawStatus == null) {
+            return false;
+        }
+        String lower = rawStatus.toLowerCase(Locale.US);
+        return TERMINAL_STATUS_KEYWORDS.stream().anyMatch(lower::contains);
+    }
+
+    /**
+     * date_change gets old-date -> new-date (no time -- the subscriber
+     * clicks through to the listing for the exact new time); everything
+     * else keeps the existing raw "event_type: new_value" pass-through.
+     */
+    private static String formatChangeLabel(ChangedListing change) {
+        if ("date_change".equals(change.eventType())) {
+            return escape("%s → %s".formatted(dateOnly(change.oldValue()), dateOnly(change.newValue())));
+        }
+        return escape("%s: %s".formatted(change.eventType(), nullToDash(change.newValue())));
+    }
+
+    /**
+     * Formats a raw auction_datetime-style ISO local string (e.g.
+     * "2026-07-16T09:00:00") down to just the date. Falls back to the
+     * raw value on a parse failure rather than a dash, since silently
+     * collapsing an unparseable-but-real date to "—" would hide it.
+     */
+    private static String dateOnly(String rawIsoLocalDateTime) {
+        if (rawIsoLocalDateTime == null || rawIsoLocalDateTime.isBlank()) {
+            return "—";
+        }
+        try {
+            return LocalDateTime.parse(rawIsoLocalDateTime).toLocalDate().toString();
+        } catch (Exception e) {
+            return rawIsoLocalDateTime;
+        }
     }
 
     private String changeRow(ChangedListing listing, String dateText, String labels, String category) {
