@@ -20,19 +20,14 @@ import java.util.Locale;
 /**
  * Renders the weekly digest HTML — same structure/CSS as
  * email_preview.html — from live data in auctionscout.db. Deliberately
- * "dumb": renders whatever event_type/old_value/new_value strings are
- * actually in the database verbatim, no attempt to interpret or
- * categorize them into a fixed tag vocabulary. See
- * PropertyDigestRepository's javadoc for why.
+ * "dumb": shows event_type/old_value/new_value verbatim rather than
+ * interpreting them into a fixed vocabulary (see
+ * PropertyDigestRepository's javadoc for why).
  *
- * renderForSubscriber() is the entry point meant for reuse — both the
- * web-facing status page (via a Controller resolving a session token to
- * an email) and the scheduled weekly email job call this same method
- * rather than duplicating the "look up states, then render" logic in
- * two places. The `truncate` flag is how those two callers differ:
- * StatusController passes false (show everything — it's the page the
- * truncated email points people back to), DigestSendService passes true
- * (cap each section so the email stays short).
+ * renderForSubscriber() is the shared entry point for both the status
+ * page and the scheduled email job. `truncate` is how they differ:
+ * false shows everything (status page), true caps each section at a
+ * few rows with "+N more" links (email).
  */
 @Service
 public class DigestService {
@@ -40,52 +35,34 @@ public class DigestService {
     private static final DateTimeFormatter DAY_HEADER = DateTimeFormatter.ofPattern("EEEE, MMMM d", Locale.US);
     private static final DateTimeFormatter LISTING_META = DateTimeFormatter.ofPattern("MM/dd 'at' h:mm a", Locale.US);
 
-    // "New" listing noise filter (see renderChanges): a brand-new listing
-    // whose auction is more than FAR_OUT_DAYS away, and that hasn't
-    // accumulated at least MIN_HISTORY_DAYS of confirmed observation
+    // A property whose auction is more than FAR_OUT_DAYS away, and that
+    // hasn't accumulated MIN_HISTORY_DAYS of confirmed observation
     // (last_seen_at - first_seen_at), is suppressed from the digest
-    // rather than announced as "New". Tune both here, in one place.
+    // entirely until it clears the bar.
     private static final int FAR_OUT_DAYS = 30;
     private static final int MIN_HISTORY_DAYS = 7;
 
-    // Email truncation caps — only applied when truncate=true. Chosen
-    // to keep the email short enough to skim; the web status page
-    // (truncate=false) always shows everything, since it's exactly
-    // where the "+N more" / "View all" links in the email point.
+    // Email section caps, only applied when truncate=true. The status
+    // page (truncate=false) always shows everything.
     private static final int MAX_LISTINGS_PER_DAY = 5;
     private static final int MAX_CHANGES_PER_BUCKET = 5;
 
-    // Status-change rows only get a "View listing/map" link if the
-    // auction is coming up soon -- a change on something 3 months out
-    // is informational, not something to act on immediately, so the
-    // extra link is noise there. Tune here if the cutoff needs adjusting.
+    // A change only gets a "View listing/map" link if the auction is
+    // within this many days -- a change on something months out isn't
+    // something to act on right now.
     private static final int NEW_LISTING_LINK_WINDOW_DAYS  = 21;
 
-    // status_change values seen in the wild that mean the auction won't
-    // happen as listed (sold, cancelled, transferred to a third-party
-    // sale) -- treated the same as a structural 'disappeared' event: same
-    // "Removed" bucket, same notification-history gate (see
-    // isRemovalEvent). Substring match, case-insensitive, rather than an
-    // exact-value list, since the Python pipeline's status text isn't a
-    // controlled vocabulary (see PropertyDigestRepository's javadoc) and
-    // spelling already varies in practice (e.g. cancelled/canceled).
+    // status_change values meaning the auction won't happen as listed --
+    // treated as "Removed". Substring match since the pipeline's status
+    // text isn't a controlled vocabulary (spelling already varies, e.g.
+    // cancelled/canceled).
     private static final List<String> TERMINAL_STATUS_KEYWORDS =
             List.of("cancel", "sold", "third party", "3rd party");
 
-    // render() emits these literal placeholders instead of a real URL
-    // for the two "View all ..." links, rather than resolving them
-    // itself — it has no subscriber email to build a personalized
-    // auto-login link with, and no reason to (see renderForSubscriber(),
-    // the only place that knows both the email and whether this is
-    // going into an email vs the web page). Two distinct placeholders,
-    // not one shared: each digest link needs its own single-use token,
-    // since a magic-link token only verifies once — sharing one between
-    // both links would leave whichever gets clicked second showing
-    // "invalid or expired". A caller that invokes render() directly
-    // (e.g. a unit test with a bare state list) will see these literal
-    // strings in the output instead of a link if truncation ever
-    // actually kicks in for it — expected, not a bug, since only
-    // renderForSubscriber() fills them in.
+    // Placeholders render() emits for the "View all ..." links since it
+    // has no subscriber email to build a real link with -- only
+    // renderForSubscriber() fills these in. Two distinct placeholders
+    // because each needs its own single-use magic-link token.
     private static final String UPCOMING_LINK_PLACEHOLDER = "{{STATUS_LINK_UPCOMING}}";
     private static final String CHANGES_LINK_PLACEHOLDER = "{{STATUS_LINK_CHANGES}}";
 
@@ -108,18 +85,11 @@ public class DigestService {
     }
 
     /**
-     * Looks up the subscriber's saved states, renders their digest, then
-     * fills in the "View all ..." links render() left as placeholders.
-     * For truncate=true (email), each link gets its own fresh, single-
-     * use, 30-minute auto-login token pointing at post-login.html#...
-     * &redirect=/auction-scout/status.html — clicking it verifies and
-     * lands the subscriber straight on their status page, no CAPTCHA/
-     * re-registration hoop, matching the existing registration-link
-     * mechanism exactly (same TokenService, same /verify endpoint).
-     * For truncate=false (the web status page itself), the placeholders
-     * never actually appear in the rendered output in the first place
-     * (nothing is ever truncated there), so this only replaces them as
-     * a harmless no-op safety net, not a real path.
+     * Looks up the subscriber's states, renders their digest, then fills
+     * in the "View all ..." link placeholders render() left behind.
+     * truncate=true issues fresh auto-login tokens (same magic-link
+     * mechanism as registration); truncate=false points at the plain
+     * status page URL, since nothing is ever truncated there.
      */
     public String renderForSubscriber(String email, OffsetDateTime changesSince, boolean truncate) {
         List<String> states = subscribers.getStates(email);
@@ -136,12 +106,9 @@ public class DigestService {
     }
 
     /**
-     * Issues a fresh magic-link token (same TokenService, same
-     * login_tokens table as registration) and points it at
-     * post-login.html with a redirect back to status.html. The 30-
-     * minute expiry isn't enforced here — issue() itself has no
-     * concept of a TTL — it's enforced entirely by VerifyController
-     * when the token is consumed, same as every other magic link.
+     * Issues a magic-link token pointing at post-login.html, redirecting
+     * to status.html. Expiry is enforced by VerifyController on consume,
+     * same as every other magic link.
      */
     private String buildAutoLoginLink(String email) {
         String rawToken = tokenService.issue(email);
@@ -152,28 +119,22 @@ public class DigestService {
     }
 
     /**
-     * @param changesSince cutoff for the "what changed" section — until
-     *                      per-subscriber "last digest sent" tracking
-     *                      exists (scheduling work, not built yet),
-     *                      callers should pass something reasonable
-     *                      like "7 days ago" rather than a real
-     *                      per-subscriber value.
-     * @param truncate      true for email (cap each section at 5, with
-     *                      "+N more" / "View all" links back to the web
-     *                      status page); false to show everything (the
-     *                      web status page itself).
+     * @param changesSince cutoff for the "what changed" section. Until
+     *                      per-subscriber "last sent" tracking exists,
+     *                      pass something like "7 days ago".
+     * @param truncate      true for email (cap sections, "+N more"
+     *                      links); false to show everything.
      */
     public String render(List<String> states, OffsetDateTime changesSince, boolean truncate) {
         return render(null, states, changesSince, truncate);
     }
 
     /**
-     * @param email  the subscriber this digest is for, or null for a
-     *               bare call with no subscriber context (e.g. a unit
-     *               test). Used solely to gate the "Removed" bucket —
-     *               see renderChanges() — against NotificationRepository;
-     *               a null email means "never emailed", so nothing is
-     *               ever shown as Removed for that call.
+     * @param email the subscriber this digest is for, or null for a bare
+     *              call with no subscriber context (e.g. a unit test).
+     *              Gates the "Removed" bucket against notification
+     *              history — null means nothing is ever shown as
+     *              Removed.
      */
     public String render(String email, List<String> states, OffsetDateTime changesSince, boolean truncate) {
         LocalDateTime now = LocalDateTime.now();
@@ -219,15 +180,11 @@ public class DigestService {
     }
 
     private String renderUpcoming(List<UpcomingListing> upcoming, boolean truncate, String viewAllLinkHref) {
-        // Group by day first so the per-day cap applies within each day,
-        // not across the whole 7-day window.
+        // Group by day so the per-day cap applies within each day.
         java.util.Map<String, List<UpcomingListing>> byDay = new java.util.LinkedHashMap<>();
         for (UpcomingListing listing : upcoming) {
-            // Unparseable auction_datetime -> no safe day/time to group
-            // under, so it's skipped from this view. If that's hiding
-            // real listings, it's a sign the source data needs cleanup
-            // at the pipeline, per the "dumb frontend" decision — not
-            // something to special-case here.
+            // Unparseable auction_datetime -- skip rather than guess a
+            // day to group it under.
             if (listing.auctionDateTime() == null) {
                 continue;
             }
@@ -251,9 +208,6 @@ public class DigestService {
 
             int remaining = dayListings.size() - shown;
             if (remaining > 0) {
-                // Linked right where the count is shown, rather than
-                // one summary link at the bottom of the whole section --
-                // each day's overflow is its own reason to click through.
                 html.append("<div class='listing'><span class='empty'>+%d more auction%s this day — <a href='%s'>view all →</a></span></div>\n"
                         .formatted(remaining, remaining == 1 ? "" : "s", viewAllLinkHref));
             }
@@ -286,23 +240,17 @@ public class DigestService {
             return "<p class='empty'>No status changes to report this week.</p>";
         }
 
-        // Group by address so a property with multiple events in this
-        // window (e.g. a cancellation producing both a status_change AND
-        // a date_change) renders as one row with combined labels, not one
-        // row per event -- a subscriber seeing the same address twice in
-        // one digest reads as a bug even though the underlying data isn't
-        // wrong. LinkedHashMap preserves the query's detected_at DESC
-        // ordering for whichever address is encountered first.
+        // Group by address so a property with multiple events this
+        // window renders as one row with combined labels, not one row
+        // per event.
         java.util.Map<String, List<ChangedListing>> byAddress = new java.util.LinkedHashMap<>();
         for (ChangedListing change : changes) {
             byAddress.computeIfAbsent(change.address(), k -> new java.util.ArrayList<>()).add(change);
         }
 
-        // Each address is bucketed into exactly one of these four
-        // categories, so "show first 5, +N more" can be applied per
-        // category rather than to one big mixed list. This is also the
-        // display order: New first, then how things are shifting
-        // (Date/Status), Removed last.
+        // Each address lands in exactly one bucket, so "+N more" applies
+        // per category. Also the display order: New, then Date/Status
+        // changes, then Removed.
         List<String> newRows = new java.util.ArrayList<>();
         List<String> dateChangeRows = new java.util.ArrayList<>();
         List<String> statusChangeRows = new java.util.ArrayList<>();
@@ -311,49 +259,26 @@ public class DigestService {
         for (List<ChangedListing> group : byAddress.values()) {
             ChangedListing first = group.get(0);
             boolean wasNew = group.stream().anyMatch(c -> "first_seen".equals(c.eventType()));
-            // A structural 'disappeared' event OR a status_change whose
-            // new value indicates the auction is over (sold/cancelled/
-            // third-party sale) both mean the same thing to a
-            // subscriber -- see isRemovalEvent.
+            // A structural 'disappeared' event or a terminal
+            // status_change both mean "Removed" -- see isRemovalEvent.
             boolean wasRemoved = group.stream().anyMatch(DigestService::isRemovalEvent);
-            // A property can be first_seen AND have a date_change/
-            // price_change land in the same rolling changesSince window
-            // -- e.g. a listing that's "new" to this digest but whose
-            // date was also revised before the subscriber ever saw the
-            // original one. That's strictly more informative than a
-            // bare "New" tag, so it wins the bucket assignment -- same
-            // precedence idea as date_change winning over price_change
-            // below, just one level up. Only date_change/price_change
-            // count here -- status_change is either folded into
-            // wasRemoved above (terminal) or suppressed as noise (see
-            // isNoiseStatusChange), so it never justifies bumping a
-            // group out of the plain "New" bucket on its own. Once
-            // per-subscriber changesSince tracking exists (see render()
-            // javadoc), a first_seen+date_change combo like this should
-            // become rare, since a subscriber's very next digest after
-            // "New" would have its own fresh changesSince cutoff.
+            // date_change/price_change are more informative than a bare
+            // "New" tag, so they win the bucket assignment when combined
+            // with a first_seen in the same window. status_change is
+            // excluded here -- it's either folded into wasRemoved
+            // (terminal) or suppressed as noise (isNoiseStatusChange).
             boolean hasOtherChangeType = group.stream().anyMatch(c ->
                     "date_change".equals(c.eventType()) || "price_change".equals(c.eventType()));
 
-            // Appeared and vanished within the same digest window: the
-            // subscriber never had a real chance to see this listing, so
-            // reporting it as "Removed" (or anything else) is noise, not
-            // information. Skip the property entirely rather than
-            // showing any tag for it.
-            if (wasNew && wasRemoved) {
-                continue;
-            }
-
-            // A brand-new listing that's both far out (>30 days) and
-            // hasn't accumulated at least 7 days of observed history yet
-            // is suppressed from the "New" announcement — see FAR_OUT_DAYS
-            // comment above for the full reasoning. Only applies to a pure
-            // "New" row -- if hasOtherChangeType is also true, this row
-            // is about to carry real change info (date/status/price), and
-            // that shouldn't be thrown away just because the underlying
-            // property also happens to be new and far out.
-            if (wasNew && !wasRemoved && !hasOtherChangeType && first.auctionDateTime() != null
-                    && first.firstSeenAt() != null && first.lastSeenAt() != null) {
+            // Seasoning: a still-far-out, unconfirmed property is
+            // suppressed entirely -- New, Date Change, Removed, and
+            // Price Change alike -- not just from "New". Applying it
+            // uniformly avoids two leaks: a date_change riding alongside
+            // first_seen bypassing a narrower New-only check, and an
+            // unseasoned property later disappearing in a DIFFERENT
+            // digest window (where first_seen is no longer in view)
+            // showing up as an unexplained Removed.
+            if (first.auctionDateTime() != null && first.firstSeenAt() != null && first.lastSeenAt() != null) {
                 boolean farOut = first.auctionDateTime().isAfter(LocalDateTime.now().plusDays(FAR_OUT_DAYS));
                 boolean notEnoughHistoryYet = first.lastSeenAt().isBefore(first.firstSeenAt().plusDays(MIN_HISTORY_DAYS));
                 if (farOut && notEnoughHistoryYet) {
@@ -361,20 +286,22 @@ public class DigestService {
                 }
             }
 
+            // Appeared and vanished within the same window -- the
+            // subscriber never had a chance to see it, so skip entirely.
+            if (wasNew && wasRemoved) {
+                continue;
+            }
+
             String dateText = first.auctionDateTime() != null
                     ? first.auctionDateTime().format(LISTING_META)
                     : "date unknown";
 
             if (wasRemoved) {
-                // Only announce a Removed listing if this subscriber
-                // actually had a chance to see it before it vanished --
-                // i.e. some email went out to them before the
-                // "disappeared" event was detected. Otherwise this is
-                // the same kind of noise as the wasNew&&wasRemoved skip
-                // above: telling someone something was removed when they
-                // never knew it existed. A null email (bare render()
-                // call, no subscriber context) is treated the same as
-                // "never emailed" -- nothing shown as Removed.
+                // Only announce Removed if this subscriber was actually
+                // emailed before the removal was detected -- otherwise
+                // they're being told something disappeared that they
+                // never knew existed. Null email (no subscriber context)
+                // counts as "never emailed".
                 OffsetDateTime disappearedAt = group.stream()
                         .filter(DigestService::isRemovalEvent)
                         .map(ChangedListing::detectedAt)
@@ -391,18 +318,10 @@ public class DigestService {
                 newRows.add(changeRow(first, dateText, "<span class='tag'>%s</span>".formatted(escape("New")), "New"));
             } else {
                 // Raw pass-through for whatever's left (price_change, or
-                // any event type not yet recognized by isRemovalEvent/
-                // isNoiseStatusChange above) -- date_change gets special
-                // formatting (see formatChangeLabel), everything else is
-                // still shown as "event_type: new_value" verbatim rather
-                // than guessed at, per the "dumb frontend" approach (see
-                // PropertyDigestRepository's javadoc). first_seen and
-                // removal events are excluded -- handled by wasNew/
-                // wasRemoved above -- and a noise status_change (e.g.
-                // "active", "available - contact auctioneer") is
-                // excluded entirely rather than shown raw, since it's
-                // just the property cycling through the auction house's
-                // own listing states, not something actionable.
+                // any not-yet-recognized event type); date_change gets
+                // special date-only formatting. first_seen, removal
+                // events, and noise status_change are excluded --
+                // handled above or suppressed as not actionable.
                 String labels = group.stream()
                         .filter(change -> !"first_seen".equals(change.eventType())
                                 && !isRemovalEvent(change)
@@ -415,28 +334,18 @@ public class DigestService {
                     labels = "<span class='tag'>%s</span> ".formatted(escape("New")) + labels;
                 }
                 if (labels.isBlank()) {
-                    // Nothing left to show after filtering out noise --
-                    // e.g. the only event in this window was a
-                    // non-terminal status_change. Skip the row entirely
-                    // rather than rendering an empty change with no
-                    // explanation.
+                    // Nothing left after filtering noise -- skip rather
+                    // than render an empty, unexplained row.
                     continue;
                 }
-                // An address can technically span more than one non-New/
-                // Removed event type in the same window (e.g. a
-                // postponement that also moved the date). date_change
-                // wins the bucket assignment when both are present --
-                // deterministic, and keeps a single address from
-                // appearing in two sections at once.
+                // date_change wins the bucket when combined with
+                // price_change, so an address only appears in one place.
                 boolean hasDateChange = group.stream().anyMatch(c -> "date_change".equals(c.eventType()));
                 String category = hasDateChange ? "Date Changes" : "Status Changes";
                 String row = changeRow(first, dateText, labels, category);
                 if (hasDateChange) {
                     dateChangeRows.add(row);
                 } else {
-                    // Only price_change (and any not-yet-recognized event
-                    // type) reach here now -- terminal status_change is
-                    // Removed, noise status_change is suppressed above.
                     statusChangeRows.add(row);
                 }
             }
@@ -462,11 +371,9 @@ public class DigestService {
     }
 
     /**
-     * True for both a structural 'disappeared' event and a status_change
-     * whose new value indicates the auction is over (sold/cancelled/
-     * third-party sale) -- subscriber-facing rendering treats these
-     * identically as "Removed", including the same notification-history
-     * gate in the wasRemoved branch above.
+     * True for a structural 'disappeared' event or a status_change whose
+     * new value indicates the auction is over -- both render as
+     * "Removed".
      */
     private static boolean isRemovalEvent(ChangedListing c) {
         return "disappeared".equals(c.eventType())
@@ -474,12 +381,9 @@ public class DigestService {
     }
 
     /**
-     * status_change values that are neither terminal (see
-     * isRemovalEvent) nor otherwise informative -- e.g. "active" or
-     * "available - contact auctioneer" just reflect the property
-     * cycling through the auction house's own listing states, not
-     * something a subscriber needs to act on. Excluded from the digest
-     * entirely rather than shown as a raw, hard-to-interpret tag.
+     * status_change values that are neither terminal nor informative
+     * (e.g. "active") -- just the property cycling through listing
+     * states, not something to act on. Excluded from the digest.
      */
     private static boolean isNoiseStatusChange(ChangedListing c) {
         return "status_change".equals(c.eventType()) && !isTerminalStatus(c.newValue());
@@ -493,11 +397,7 @@ public class DigestService {
         return TERMINAL_STATUS_KEYWORDS.stream().anyMatch(lower::contains);
     }
 
-    /**
-     * date_change gets old-date -> new-date (no time -- the subscriber
-     * clicks through to the listing for the exact new time); everything
-     * else keeps the existing raw "event_type: new_value" pass-through.
-     */
+    /** date_change gets date-only old -> new; everything else is raw pass-through. */
     private static String formatChangeLabel(ChangedListing change) {
         if ("date_change".equals(change.eventType())) {
             return escape("%s → %s".formatted(dateOnly(change.oldValue()), dateOnly(change.newValue())));
@@ -505,12 +405,7 @@ public class DigestService {
         return escape("%s: %s".formatted(change.eventType(), nullToDash(change.newValue())));
     }
 
-    /**
-     * Formats a raw auction_datetime-style ISO local string (e.g.
-     * "2026-07-16T09:00:00") down to just the date. Falls back to the
-     * raw value on a parse failure rather than a dash, since silently
-     * collapsing an unparseable-but-real date to "—" would hide it.
-     */
+    /** Formats an ISO local datetime string down to just the date. Falls back to the raw value on parse failure. */
     private static String dateOnly(String rawIsoLocalDateTime) {
         if (rawIsoLocalDateTime == null || rawIsoLocalDateTime.isBlank()) {
             return "—";
@@ -523,9 +418,8 @@ public class DigestService {
     }
 
     private String changeRow(ChangedListing listing, String dateText, String labels, String category) {
-        // data-date carries the raw auction datetime (or "" if unknown) so
-        // the status page can sort chronologically; dateText next to it is
-        // the human-readable string actually shown in the cell.
+        // data-date is for client-side sorting; dateText is the
+        // human-readable text shown in the cell.
         String isoDate = listing.auctionDateTime() != null ? listing.auctionDateTime().toString() : "";
         return "<tr data-state='%s' data-date='%s' data-category='%s'><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n"
                 .formatted(escape(listing.state()), isoDate, escape(category),
@@ -533,13 +427,8 @@ public class DigestService {
     }
 
     /**
-     * "View listing" (always, if within window) plus "View map" (only
-     * if the property has coordinates) -- same link shapes as
-     * renderOneUpcoming(), reused here rather than duplicated logic
-     * diverging over time. Empty string (no link at all) if the
-     * auction is more than CHANGE_LINK_WINDOW_DAYS out, or dateless --
-     * a change on something months away, or with no date at all, isn't
-     * something to act on right now.
+     * "View listing" + "View map" (if geocoded), or nothing if the
+     * auction is more than NEW_LISTING_LINK_WINDOW_DAYS out or dateless.
      */
     private String changeLinkCell(ChangedListing listing) {
         if (listing.auctionDateTime() == null) {
@@ -547,12 +436,9 @@ public class DigestService {
         }
         boolean withinWindow = listing.auctionDateTime().isBefore(LocalDateTime.now().plusDays(NEW_LISTING_LINK_WINDOW_DAYS ));
         if (!withinWindow) {
-            // Far-out auctions change too often between now and the
-            // actual date (postponements, cancellations, relistings) for
-            // a link to reliably still be accurate by the time someone
-            // clicks it — see NEW_LISTING_LINK_WINDOW_DAYS. "Coming soon"
-            // says something is on the way without pointing at a source
-            // page/map that may no longer reflect it by then.
+            // Far-out auctions change too often (postponements,
+            // cancellations) for a link to stay accurate by the time
+            // it's clicked.
             return "<span class='empty'>Coming soon</span>";
         }
 
@@ -565,12 +451,9 @@ public class DigestService {
     }
 
     /**
-     * Renders one change subsection (mini heading + table), capped at
-     * MAX_CHANGES_PER_BUCKET rows when truncate is true, with a "+N
-     * more" note appended if any rows were cut. Renders nothing (and
-     * returns false) if rows is empty — no point in a heading over an
-     * empty table. Returns whether this section was actually truncated,
-     * so the caller knows whether to show the overall "View all" link.
+     * Renders one change subsection, capped at MAX_CHANGES_PER_BUCKET
+     * rows when truncated. Returns false (and renders nothing) if rows
+     * is empty; otherwise returns whether it was truncated.
      */
     private boolean appendChangeSection(StringBuilder html, String heading, List<String> rows, boolean truncate) {
         if (rows.isEmpty()) {

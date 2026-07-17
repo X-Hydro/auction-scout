@@ -527,12 +527,62 @@ class DigestServiceTest {
     // wasRemoved branch and NotificationRepository.hasSentBefore().
 
     @Test
+    void render_showsRemoved_whenListingWasIncludedInPriorWeeksEmail() {
+        // The realistic weekly cycle: this listing was already known
+        // (first seen well before this week -- outside changesSince, so
+        // it's NOT flagged "New" in this digest), last week's email went
+        // out and would have included it, and now -- within THIS week's
+        // window -- it's disappeared. That's exactly the case "Removed"
+        // exists to report: the subscriber had a real chance to see it.
+        long propertyId = testData.property()
+                .address("12 Winslow Way, Concord, NH")
+                .state("NH")
+                .firstSeenAt("2026-06-01T08:00:00.000000+00:00")
+                .insert();
+        long auctionId = testData.auction(propertyId).insert();
+        testData.event(auctionId, "first_seen")
+                .newValue("active")
+                .detectedAt("2026-06-01T08:00:00.000000+00:00") // well before this week's changesSince
+                .insert();
+        testData.event(auctionId, "disappeared")
+                .oldValue("active")
+                .detectedAt("2026-07-14T09:00:00.000000+00:00") // inside this week's window
+                .insert();
+        // "Last week's email" -- sent after the listing was first seen,
+        // before it disappeared.
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-08T09:00:00+00:00"));
+
+        String html = digestService.render(
+                TEST_EMAIL,
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-08T00:00:00+00:00"), // this week's cutoff
+                false
+        );
+
+        assertTrue(html.contains(">Removed<"),
+                "listing was in a prior email and has now disappeared -- should be reported as Removed");
+    }
+
+    @Test
     void render_suppressesRemoved_whenSubscriberWasNeverEmailed() {
+        // Same shape as render_showsRemoved_whenListingWasIncludedInPriorWeeksEmail
+        // above -- listing was genuinely new at some point (first_seen,
+        // outside this window) and has now disappeared -- but this time
+        // with ZERO notification history: no digest ever went out to
+        // this subscriber, for any reason (brand-new subscriber whose
+        // first send hasn't happened yet, a delivery failure, etc). No
+        // customer ever saw it, so there's nothing to notify them was
+        // removed.
         long propertyId = testData.property()
                 .address("9 Larch Lane, Dover, NH")
                 .state("NH")
+                .firstSeenAt("2026-06-01T08:00:00.000000+00:00")
                 .insert();
         long auctionId = testData.auction(propertyId).insert();
+        testData.event(auctionId, "first_seen")
+                .newValue("active")
+                .detectedAt("2026-06-01T08:00:00.000000+00:00")
+                .insert();
         testData.event(auctionId, "disappeared")
                 .oldValue("active")
                 .detectedAt("2026-07-14T09:00:00.000000+00:00")
@@ -542,7 +592,7 @@ class DigestServiceTest {
         String html = digestService.render(
                 TEST_EMAIL,
                 List.of("NH"),
-                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                OffsetDateTime.parse("2026-07-08T00:00:00+00:00"),
                 false
         );
 
