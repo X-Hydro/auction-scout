@@ -1,5 +1,6 @@
 package com.oncoord.auctionscout.digest;
 
+import com.oncoord.auctionscout.notification.NotificationRepository;
 import com.oncoord.auctionscout.properties.PropertiesDbConnectionManager;
 import com.oncoord.auctionscout.properties.PropertyDigestRepository;
 import com.oncoord.auctionscout.testsupport.PropertyDigestTestData;
@@ -53,28 +54,36 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class DigestServiceTest {
 
     private static final Path TEST_DB_DIR = Path.of("src/test/db");
-    private static final Path DB_PATH = TEST_DB_DIR.resolve("auction-scout-manager-digest.db");
+    // Mirrors the two real, physically separate SQLite files in
+    // production -- auctionscout.db (properties/auctions/auction_events,
+    // written by the Python pipeline) and auctionscout-manager.db
+    // (login_tokens/subscribers/email_notifications, owned by this
+    // service). See PropertiesDbConnectionManager's javadoc.
+    private static final Path DB_PATH = TEST_DB_DIR.resolve("auctionscout-test.db");
+    private static final Path MANAGER_DB_PATH = TEST_DB_DIR.resolve("auctionscout-manager-test.db");
+    private static final String TEST_EMAIL = "subscriber@example.com";
 
     private SingleConnectionDataSource dataSource;
+    private SingleConnectionDataSource managerDataSource;
     private PropertyDigestTestData testData;
     private DigestService digestService;
     private PropertiesDbConnectionManager dbManager;
+    private JdbcTemplate managerJdbc;
 
 
     @BeforeEach
     void setUp(TestInfo testInfo) throws IOException, SQLException {
         Files.createDirectories(TEST_DB_DIR);
         Files.deleteIfExists(DB_PATH);
+        Files.deleteIfExists(MANAGER_DB_PATH);
 
         dataSource = new SingleConnectionDataSource("jdbc:sqlite:" + DB_PATH.toAbsolutePath(), true);
         try (Connection conn = dataSource.getConnection()) {
-            // This is the properties/auctions/auction_events schema for
-            // auctionscout.db (written by the Python scraping pipeline) --
-            // a DIFFERENT database from the auth/login schema
-            // (auction-scout-manager.sql) that AuctionScoutTokenStoreTest
-            // uses. It lives one level up from this module's working
-            // directory, as a sibling of auction-scout-manager/ (not
-            // inside it), so it can't be loaded via ClassPathResource.
+            // properties/auctions/auction_events schema (written by the
+            // Python scraping pipeline). Lives one level up from this
+            // module's working directory, as a sibling of
+            // auction-scout-manager/ (not inside it), so it can't be
+            // loaded via ClassPathResource.
             Path schemaPath = Path.of("../auction-scout-data/schema.sql");
             if (!Files.exists(schemaPath)) {
                 throw new IllegalStateException(
@@ -86,24 +95,73 @@ class DigestServiceTest {
             ScriptUtils.executeSqlScript(conn, new FileSystemResource(schemaPath.toFile()));
         }
 
+        // Second, physically separate database: login_tokens/subscribers/
+        // email_notifications -- same schema AuctionScoutTokenStoreTest
+        // uses, loaded here for its email_notifications table, which
+        // NotificationRepository (and therefore DigestService's
+        // "Removed" gating) reads from.
+        managerDataSource = new SingleConnectionDataSource(
+                "jdbc:sqlite:" + MANAGER_DB_PATH.toAbsolutePath(), true);
+        try (Connection conn = managerDataSource.getConnection()) {
+            Path managerSchemaPath = Path.of("src/main/resources/auction-scout-manager.sql");
+            if (!Files.exists(managerSchemaPath)) {
+                throw new IllegalStateException(
+                        "Expected auction-scout-manager.sql at " + managerSchemaPath.toAbsolutePath()
+                                + " (relative to the test's working directory). "
+                                + "If the repo layout or run-configuration working directory changed, "
+                                + "update the managerSchemaPath value above.");
+            }
+            ScriptUtils.executeSqlScript(conn, new FileSystemResource(managerSchemaPath.toFile()));
+        }
+        managerJdbc = new JdbcTemplate(managerDataSource);
+
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
         dbManager = new PropertiesDbConnectionManager(DB_PATH.toString());
         testData = new PropertyDigestTestData(jdbc);
         PropertyDigestRepository repository = new PropertyDigestRepository(dbManager);
+        NotificationRepository notifications = new NotificationRepository(managerJdbc);
         // null for both SubscriberRepository and TokenService: render()
         // (the only method every test here calls) touches neither --
         // only renderForSubscriber() does, for the email auto-login
         // links. Same reasoning as the existing SubscriberRepository
         // null, just now applying to the newer TokenService param too.
-        digestService = new DigestService(repository, null, null, "https://oncoord.com");
+        digestService = new DigestService(repository, null, notifications, null, "https://oncoord.com");
     }
 
     @AfterEach
     void closeConnection() {
-        dbManager.close();
-        dataSource.destroy();
-        // DB file deliberately left on disk for inspection -- see class javadoc.
+        // Null-checked deliberately: if setUp() throws partway through
+        // (e.g. a schema file not found), later fields never get
+        // assigned. Without these guards, @AfterEach would NPE on top
+        // of the real failure, and worse, skip destroy()-ing whichever
+        // DataSource DID get created -- leaving its SQLite file locked
+        // (Windows holds an open file handle) for the next test run.
+        if (dbManager != null) {
+            dbManager.close();
+        }
+        if (dataSource != null) {
+            dataSource.destroy();
+        }
+        if (managerDataSource != null) {
+            managerDataSource.destroy();
+        }
+        // DB files deliberately left on disk for inspection -- see class javadoc.
     }
+
+    /**
+     * Records an email_notifications row with an explicit sent_at,
+     * bypassing NotificationRepository.recordSent() (which always
+     * stamps System.currentTimeMillis() -- not usable here, since these
+     * tests need sent_at deliberately before or after a specific
+     * auction_events.detected_at to exercise DigestService's "was this
+     * subscriber ever emailed before the listing disappeared" gate).
+     */
+    private void recordNotificationSentAt(String email, OffsetDateTime sentAt) {
+        managerJdbc.update(
+                "INSERT INTO email_notifications (email, notification_type, sent_at) VALUES (?, 'weekly', ?)",
+                email, sentAt.toInstant().toEpochMilli());
+    }
+
 
     @Test
     void render_showsDateChangeTag_forListingWithOnlyADateChangeEvent() {
@@ -127,8 +185,14 @@ class DigestServiceTest {
 
         assertTrue(html.contains("42 Elm Street, Nashua, NH"),
                 "expected the property address in the Status Changes section");
-        assertTrue(html.contains("date_change: 2026-07-20T10:00:00"),
-                "expected the raw event_type/new_value pass-through as the tag text");
+        // Date-only, old -> new, no time and no "date_change:" prefix --
+        // see DigestService.formatChangeLabel()/dateOnly().
+        assertTrue(html.contains("2026-07-15 → 2026-07-20"),
+                "expected old date -> new date, with no time component");
+        assertFalse(html.contains("2026-07-20T10:00:00"),
+                "the time portion should not appear in a date_change tag");
+        assertFalse(html.contains("date_change:"),
+                "the raw event_type prefix should not appear -- the Date Changes heading already says what this is");
 
         // A pure date_change (not paired with first_seen or disappeared
         // in this window) must NOT be relabeled New or Removed -- those
@@ -229,7 +293,7 @@ class DigestServiceTest {
     }
 
     @Test
-    void render_showsRemovedTag_forDisappearedEvent() {
+    void render_showsRemovedTag_forDisappearedEvent_whenSubscriberWasEmailedBeforehand() {
         long propertyId = testData.property()
                 .address("14 Willow Way, Salem, NH")
                 .state("NH")
@@ -237,9 +301,17 @@ class DigestServiceTest {
         long auctionId = testData.auction(propertyId).insert();
         testData.event(auctionId, "disappeared")
                 .oldValue("active")
+                .detectedAt("2026-07-14T09:00:00.000000+00:00")
                 .insert();
 
+        // Subscriber received a digest the day before this listing
+        // disappeared -- they had a real chance to see it, so "Removed"
+        // is legitimate information, not noise. See
+        // NotificationRepository.hasSentBefore().
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"));
+
         String html = digestService.render(
+                TEST_EMAIL,
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
                 false
@@ -329,9 +401,12 @@ class DigestServiceTest {
         long auctionId = testData.auction(propertyId).insert();
         testData.event(auctionId, "disappeared")
                 .oldValue("active")
+                .detectedAt("2026-07-14T09:00:00.000000+00:00")
                 .insert();
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"));
 
         String html = digestService.render(
+                TEST_EMAIL,
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
                 false
@@ -442,6 +517,243 @@ class DigestServiceTest {
                 "the row itself should still render -- only the link is gated by the window");
         assertFalse(html.contains("https://example.com/listing/9002"),
                 "a change more than 2 weeks out should not get a View listing link");
+    }
+
+    // ---- Removed gating: notification history --------------------------
+    //
+    // A listing should only be announced as Removed if this subscriber
+    // actually had a chance to see it -- i.e. some email went out to
+    // them before the removal was detected. See DigestService's
+    // wasRemoved branch and NotificationRepository.hasSentBefore().
+
+    @Test
+    void render_suppressesRemoved_whenSubscriberWasNeverEmailed() {
+        long propertyId = testData.property()
+                .address("9 Larch Lane, Dover, NH")
+                .state("NH")
+                .insert();
+        long auctionId = testData.auction(propertyId).insert();
+        testData.event(auctionId, "disappeared")
+                .oldValue("active")
+                .detectedAt("2026-07-14T09:00:00.000000+00:00")
+                .insert();
+        // No email_notifications row inserted at all for TEST_EMAIL.
+
+        String html = digestService.render(
+                TEST_EMAIL,
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertFalse(html.contains("9 Larch Lane, Dover, NH"),
+                "a subscriber never emailed anything never had a chance to see this listing");
+        assertTrue(html.contains("No status changes to report this week."));
+    }
+
+    @Test
+    void render_suppressesRemoved_whenSubscriberWasOnlyEmailedAfterDisappearance() {
+        long propertyId = testData.property()
+                .address("18 Sumac Street, Dover, NH")
+                .state("NH")
+                .insert();
+        long auctionId = testData.auction(propertyId).insert();
+        testData.event(auctionId, "disappeared")
+                .oldValue("active")
+                .detectedAt("2026-07-14T09:00:00.000000+00:00")
+                .insert();
+        // Only email on record is AFTER the listing disappeared --
+        // doesn't count as "had a chance to see it".
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-15T09:00:00+00:00"));
+
+        String html = digestService.render(
+                TEST_EMAIL,
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertFalse(html.contains("18 Sumac Street, Dover, NH"),
+                "an email sent after the listing disappeared doesn't establish the subscriber ever saw it");
+        assertTrue(html.contains("No status changes to report this week."));
+    }
+
+    @Test
+    void render_suppressesRemoved_whenNoEmailProvided() {
+        // The 3-arg render() overload (no subscriber context) delegates
+        // to email=null, which is treated the same as "never emailed" --
+        // this exercises that null-email path directly, independent of
+        // notification data existing or not.
+        long propertyId = testData.property()
+                .address("27 Tamarack Trail, Dover, NH")
+                .state("NH")
+                .insert();
+        long auctionId = testData.auction(propertyId).insert();
+        testData.event(auctionId, "disappeared")
+                .oldValue("active")
+                .detectedAt("2026-07-14T09:00:00.000000+00:00")
+                .insert();
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"));
+
+        String html = digestService.render(
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertFalse(html.contains("27 Tamarack Trail, Dover, NH"),
+                "a bare render() call with no subscriber context must never claim a listing as Removed");
+    }
+
+    // ---- status_change reclassification: Removed / noise / date_change -
+    //
+    // Real status_change values aren't a controlled vocabulary (see
+    // PropertyDigestRepository's javadoc) -- these confirm the specific
+    // reclassification rules in DigestService.isRemovalEvent() /
+    // isNoiseStatusChange().
+
+    @Test
+    void render_treatsTerminalStatusChange_asRemoved() {
+        long propertyId = testData.property()
+                .address("33 Juniper Way, Rochester, NH")
+                .state("NH")
+                .insert();
+        long auctionId = testData.auction(propertyId).insert();
+        testData.event(auctionId, "status_change")
+                .oldValue("active")
+                .newValue("third party sale")
+                .detectedAt("2026-07-14T09:00:00.000000+00:00")
+                .insert();
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"));
+
+        String html = digestService.render(
+                TEST_EMAIL,
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertTrue(html.contains(">Removed<"),
+                "a terminal status_change value (third party sale) should be treated as Removed");
+        assertFalse(html.contains("status_change:"),
+                "the raw status_change tag should not appear once reclassified as Removed");
+    }
+
+    @Test
+    void render_treatsCancelledStatusChange_asRemoved_evenWithSpellingVariant() {
+        long propertyId = testData.property()
+                .address("40 Alder Ave, Rochester, NH")
+                .state("NH")
+                .insert();
+        long auctionId = testData.auction(propertyId).insert();
+        testData.event(auctionId, "status_change")
+                .oldValue("active")
+                .newValue("canceled") // single-L spelling variant
+                .detectedAt("2026-07-14T09:00:00.000000+00:00")
+                .insert();
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"));
+
+        String html = digestService.render(
+                TEST_EMAIL,
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertTrue(html.contains(">Removed<"),
+                "the terminal-status keyword match is substring-based specifically to catch spelling variants");
+    }
+
+    @Test
+    void render_suppressesNoiseStatusChange_showsNothing() {
+        long propertyId = testData.property()
+                .address("52 Basswood Blvd, Rochester, NH")
+                .state("NH")
+                .insert();
+        // No auction_datetime: the default fixture date falls inside
+        // findUpcoming()'s real-clock 7-day window, and findUpcoming
+        // only excludes a property whose most recent event is literally
+        // 'disappeared' -- it has no concept of "noise status_change".
+        // Without this, the address would legitimately still show up
+        // under "Auctions in the Next 7 Days" regardless of what this
+        // test is actually checking (that no CHANGES-section row gets
+        // generated), making the assertion below fail for a reason
+        // unrelated to what's being tested.
+        long auctionId = testData.auction(propertyId).noAuctionDatetime().insert();
+        testData.event(auctionId, "status_change")
+                .oldValue("postponed")
+                .newValue("active")
+                .insert();
+
+        String html = digestService.render(
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertFalse(html.contains("52 Basswood Blvd, Rochester, NH"),
+                "a non-terminal status_change (active) is noise, not something a subscriber needs to act on");
+        assertTrue(html.contains("No status changes to report this week."));
+    }
+
+    @Test
+    void render_suppressesAvailableContactAuctioneerStatusChange() {
+        long propertyId = testData.property()
+                .address("61 Spruce Circle, Rochester, NH")
+                .state("NH")
+                .insert();
+        // See noAuctionDatetime() comment in
+        // render_suppressesNoiseStatusChange_showsNothing above -- same
+        // reasoning applies here.
+        long auctionId = testData.auction(propertyId).noAuctionDatetime().insert();
+        testData.event(auctionId, "status_change")
+                .oldValue("active")
+                .newValue("available - contact auctioneer")
+                .insert();
+
+        String html = digestService.render(
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertFalse(html.contains("61 Spruce Circle, Rochester, NH"));
+        assertTrue(html.contains("No status changes to report this week."));
+    }
+
+    // ---- New + Date Change combo in the same window ---------------------
+
+    @Test
+    void render_showsNewTagAndDateChange_whenBothLandInSameWindow() {
+        long propertyId = testData.property()
+                .address("70 Hemlock Hill, Somersworth, NH")
+                .state("NH")
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .auctionDatetime("2026-07-25T10:00:00")
+                .insert();
+        testData.event(auctionId, "first_seen")
+                .newValue("active")
+                .insert();
+        testData.event(auctionId, "date_change")
+                .oldValue("2026-07-20T10:00:00")
+                .newValue("2026-07-25T10:00:00")
+                .insert();
+
+        String html = digestService.render(
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertTrue(html.contains("Date Changes"),
+                "a first_seen+date_change combo should be categorized as Date Changes, not New");
+        assertFalse(html.contains("New Listings"),
+                "the combo shouldn't ALSO appear under New Listings -- one row, one bucket");
+        assertTrue(html.contains("class='tag'>New<"),
+                "the New context shouldn't be lost -- it should still be tagged alongside the date change");
+        assertTrue(html.contains("2026-07-20 → 2026-07-25"),
+                "expected the date-only old->new format");
     }
 
 }
