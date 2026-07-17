@@ -35,12 +35,12 @@ public class DigestService {
     private static final DateTimeFormatter DAY_HEADER = DateTimeFormatter.ofPattern("EEEE, MMMM d", Locale.US);
     private static final DateTimeFormatter LISTING_META = DateTimeFormatter.ofPattern("MM/dd 'at' h:mm a", Locale.US);
 
-    // A property whose auction is more than FAR_OUT_DAYS away, and that
-    // hasn't accumulated MIN_HISTORY_DAYS of confirmed observation
-    // (last_seen_at - first_seen_at), is suppressed from the digest
-    // entirely until it clears the bar.
-    private static final int FAR_OUT_DAYS = 30;
-    private static final int MIN_HISTORY_DAYS = 7;
+    // A property is exempt from seasoning only if its auction is within
+    // SEASONING_WINDOW_DAYS -- waiting the full window would otherwise
+    // risk running past the auction itself. Beyond that, a property
+    // needs SEASONING_WINDOW_DAYS of confirmed observation (last_seen_at
+    // - first_seen_at) before it's shown at all.
+    private static final int SEASONING_WINDOW_DAYS = 7;
 
     // Email section caps, only applied when truncate=true. The status
     // page (truncate=false) always shows everything.
@@ -279,8 +279,8 @@ public class DigestService {
             // digest window (where first_seen is no longer in view)
             // showing up as an unexplained Removed.
             if (first.auctionDateTime() != null && first.firstSeenAt() != null && first.lastSeenAt() != null) {
-                boolean farOut = first.auctionDateTime().isAfter(LocalDateTime.now().plusDays(FAR_OUT_DAYS));
-                boolean notEnoughHistoryYet = first.lastSeenAt().isBefore(first.firstSeenAt().plusDays(MIN_HISTORY_DAYS));
+                boolean farOut = first.auctionDateTime().isAfter(LocalDateTime.now().plusDays(SEASONING_WINDOW_DAYS));
+                boolean notEnoughHistoryYet = first.lastSeenAt().isBefore(first.firstSeenAt().plusDays(SEASONING_WINDOW_DAYS));
                 if (farOut && notEnoughHistoryYet) {
                     continue;
                 }

@@ -806,4 +806,171 @@ class DigestServiceTest {
                 "expected the date-only old->new format");
     }
 
+    // ---- Seasoning gate: SEASONING_WINDOW_DAYS ---------------------------
+    //
+    // A property is exempt from seasoning only if its auction is within
+    // SEASONING_WINDOW_DAYS (7) -- waiting the full window would
+    // otherwise risk running past the auction itself. Beyond that, a
+    // property needs SEASONING_WINDOW_DAYS of confirmed observation
+    // (last_seen_at - first_seen_at) before it's shown at all -- New,
+    // Date Change, Removed, and Price Change alike.
+
+    @Test
+    void render_suppressesNew_whenFarOutAndUnseasoned() {
+        long propertyId = testData.property()
+                .address("5 Foxglove Lane, Nashua, NH")
+                .state("NH")
+                // Zero confirmed history -- first seen and last seen at
+                // the exact same instant.
+                .firstSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .auctionDatetime("2026-09-15T10:00:00") // well beyond the 7-day window
+                .insert();
+        testData.event(auctionId, "first_seen")
+                .newValue("active")
+                .insert();
+
+        String html = digestService.render(
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertFalse(html.contains("5 Foxglove Lane, Nashua, NH"),
+                "far out and not yet confirmed across the seasoning window -- should not be announced");
+        assertTrue(html.contains("No status changes to report this week."));
+    }
+
+    @Test
+    void render_showsNew_forFarOutListing_onceSeasoned() {
+        long propertyId = testData.property()
+                .address("18 Marigold Court, Nashua, NH")
+                .state("NH")
+                // Default fixture firstSeenAt/lastSeenAt are ~44 days
+                // apart -- well past the 7-day seasoning bar.
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .auctionDatetime("2026-09-15T10:00:00")
+                .insert();
+        testData.event(auctionId, "first_seen")
+                .newValue("active")
+                .insert();
+
+        String html = digestService.render(
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertTrue(html.contains("18 Marigold Court, Nashua, NH"),
+                "far out, but already confirmed across the seasoning window -- should announce normally");
+        assertTrue(html.contains("class='tag'>New<"));
+    }
+
+    @Test
+    void render_showsNew_forNearTermListing_evenWithZeroHistory() {
+        // The near-term exemption exists because SEASONING_WINDOW_DAYS
+        // of waiting could otherwise run past the auction itself --
+        // confirms that exemption still works regardless of history.
+        long propertyId = testData.property()
+                .address("9 Periwinkle Place, Nashua, NH")
+                .state("NH")
+                .firstSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .auctionDatetime("2026-07-20T10:00:00") // within the 7-day window
+                .insert();
+        testData.event(auctionId, "first_seen")
+                .newValue("active")
+                .insert();
+
+        String html = digestService.render(
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertTrue(html.contains("9 Periwinkle Place, Nashua, NH"),
+                "near-term auctions bypass seasoning entirely -- waiting would risk missing the window");
+        assertTrue(html.contains("class='tag'>New<"));
+    }
+
+    @Test
+    void render_suppressesEntireRow_whenFarOutUnseasonedListingAlsoHasDateChange() {
+        // Regression guard: the seasoning gate must apply uniformly
+        // regardless of which event types are present in this window --
+        // a date_change riding alongside first_seen must not bypass it.
+        long propertyId = testData.property()
+                .address("27 Thistle Way, Nashua, NH")
+                .state("NH")
+                .firstSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .auctionDatetime("2026-09-20T10:00:00")
+                .insert();
+        testData.event(auctionId, "first_seen")
+                .newValue("active")
+                .insert();
+        testData.event(auctionId, "date_change")
+                .oldValue("2026-09-10T10:00:00")
+                .newValue("2026-09-20T10:00:00")
+                .insert();
+
+        String html = digestService.render(
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertFalse(html.contains("27 Thistle Way, Nashua, NH"),
+                "an accompanying date_change must not let an unseasoned, far-out listing bypass the gate");
+        assertTrue(html.contains("No status changes to report this week."));
+    }
+
+    @Test
+    void render_suppressesRemoved_whenFarOutUnseasonedListingDisappearsInLaterWindow() {
+        // Regression guard: a still-unseasoned listing suppressed one
+        // week must not leak through as "Removed" in a LATER digest
+        // window, where its first_seen event is no longer in view.
+        // Notification history is deliberately present and valid here
+        // (sent before the disappearance) -- if this test failed without
+        // the seasoning gate but passed because of the notification
+        // gate, that would be a false confirmation. Including valid
+        // notification history isolates this as specifically a
+        // seasoning-gate test.
+        long propertyId = testData.property()
+                .address("33 Bramble Ridge, Nashua, NH")
+                .state("NH")
+                .firstSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .auctionDatetime("2026-09-25T10:00:00")
+                .insert();
+        testData.event(auctionId, "first_seen")
+                .newValue("active")
+                .detectedAt("2026-07-14T09:00:00.000000+00:00") // outside this week's window
+                .insert();
+        testData.event(auctionId, "disappeared")
+                .oldValue("active")
+                .detectedAt("2026-07-21T09:00:00.000000+00:00") // inside this week's window
+                .insert();
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-15T09:00:00+00:00"));
+
+        String html = digestService.render(
+                TEST_EMAIL,
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-15T00:00:00+00:00"),
+                false
+        );
+
+        assertFalse(html.contains("33 Bramble Ridge, Nashua, NH"),
+                "still unseasoned -- should not surface as Removed even in a later digest window with valid notification history");
+        assertTrue(html.contains("No status changes to report this week."));
+    }
+
 }
