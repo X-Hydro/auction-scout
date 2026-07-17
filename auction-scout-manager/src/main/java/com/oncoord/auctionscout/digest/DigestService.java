@@ -24,9 +24,9 @@ import java.util.Locale;
  * interpreting them into a fixed vocabulary (see
  * PropertyDigestRepository's javadoc for why).
  *
- * renderForSubscriber() is the shared entry point for both the status
+ * renderForSubscriber() is the shared entry point for both the watch
  * page and the scheduled email job. `truncate` is how they differ:
- * false shows everything (status page), true caps each section at a
+ * false shows everything (watch page), true caps each section at a
  * few rows with "+N more" links (email).
  */
 @Service
@@ -42,7 +42,7 @@ public class DigestService {
     // - first_seen_at) before it's shown at all.
     private static final int SEASONING_WINDOW_DAYS = 7;
 
-    // Email section caps, only applied when truncate=true. The status
+    // Email section caps, only applied when truncate=true. The watch
     // page (truncate=false) always shows everything.
     private static final int MAX_LISTINGS_PER_DAY = 5;
     private static final int MAX_CHANGES_PER_BUCKET = 5;
@@ -89,14 +89,14 @@ public class DigestService {
      * in the "View all ..." link placeholders render() left behind.
      * truncate=true issues fresh auto-login tokens (same magic-link
      * mechanism as registration); truncate=false points at the plain
-     * status page URL, since nothing is ever truncated there.
+     * watch page URL, since nothing is ever truncated there.
      */
     public String renderForSubscriber(String email, OffsetDateTime changesSince, boolean truncate) {
         List<String> states = subscribers.getStates(email);
         String html = render(email, states, changesSince, truncate);
 
         if (!truncate) {
-            String plainUrl = appBaseUrl + "/auction-scout/status.html";
+            String plainUrl = appBaseUrl + "/auction-scout/watch.html";
             return html.replace(UPCOMING_LINK_PLACEHOLDER, plainUrl)
                     .replace(CHANGES_LINK_PLACEHOLDER, plainUrl);
         }
@@ -107,7 +107,7 @@ public class DigestService {
 
     /**
      * Issues a magic-link token pointing at post-login.html, redirecting
-     * to status.html. Expiry is enforced by VerifyController on consume,
+     * to watch.html. Expiry is enforced by VerifyController on consume,
      * same as every other magic link.
      */
     private String buildAutoLoginLink(String email) {
@@ -115,7 +115,7 @@ public class DigestService {
         return appBaseUrl + "/auction-scout/post-login.html#email="
                 + URLEncoder.encode(email, StandardCharsets.UTF_8)
                 + "&token=" + URLEncoder.encode(rawToken, StandardCharsets.UTF_8)
-                + "&redirect=" + URLEncoder.encode("/auction-scout/status.html", StandardCharsets.UTF_8);
+                + "&redirect=" + URLEncoder.encode("/auction-scout/watch.html", StandardCharsets.UTF_8);
     }
 
     /**
@@ -175,7 +175,7 @@ public class DigestService {
                 """.formatted(
                 now.format(DateTimeFormatter.ofPattern("MMMM d, yyyy", Locale.US)),
                 renderUpcoming(upcoming, truncate, UPCOMING_LINK_PLACEHOLDER),
-                renderChanges(changes, truncate, CHANGES_LINK_PLACEHOLDER, email)
+                renderChanges(buildChangeGroups(changes, email), truncate, CHANGES_LINK_PLACEHOLDER)
         );
     }
 
@@ -217,10 +217,8 @@ public class DigestService {
     }
 
     private String renderOneUpcoming(UpcomingListing listing) {
-        String mapLink = (listing.latitude() != null && listing.longitude() != null)
-                ? " &nbsp;·&nbsp; <a href='%s/auction-scout/?lat=%s&lng=%s&zoom=16'>View map →</a>"
-                .formatted(appBaseUrl, listing.latitude(), listing.longitude())
-                : "";
+        String mapUrl = mapUrl(listing.latitude(), listing.longitude());
+        String mapLink = mapUrl.isEmpty() ? "" : " &nbsp;·&nbsp; <a href='%s'>View map →</a>".formatted(mapUrl);
 
         return """
                 <div class='listing' data-state='%s' data-date='%s'><div class='addr'>%s</div><div class='meta'>%s</div>
@@ -235,26 +233,36 @@ public class DigestService {
         );
     }
 
-    private String renderChanges(List<ChangedListing> changes, boolean truncate, String viewAllLinkHref, String email) {
-        if (changes.isEmpty()) {
-            return "<p class='empty'>No status changes to report this week.</p>";
-        }
+    /**
+     * One address's worth of change activity, already put through the
+     * seasoning/dedup/everEmailed rules and assigned a bucket. Shared
+     * between the HTML digest and the CSV export so both stay in sync —
+     * see buildChangeGroups.
+     */
+    private record ChangeGroup(ChangedListing listing, String category, List<String> labels) {}
 
+    /**
+     * Groups changes by address, applies the seasoning/dedup/everEmailed
+     * rules, and assigns each surviving address to a category (New,
+     * Date Changes, Status Changes, Removed). This is the one place
+     * that logic lives — both renderChanges (HTML) and changesCsv build
+     * off this same list, so a rule change here can't drift between the
+     * two outputs.
+     */
+    private List<ChangeGroup> buildChangeGroups(List<ChangedListing> changes, String email) {
         // Group by address so a property with multiple events this
-        // window renders as one row with combined labels, not one row
-        // per event.
+        // window collapses into one entry with combined labels, not one
+        // entry per event.
         java.util.Map<String, List<ChangedListing>> byAddress = new java.util.LinkedHashMap<>();
         for (ChangedListing change : changes) {
             byAddress.computeIfAbsent(change.address(), k -> new java.util.ArrayList<>()).add(change);
         }
 
-        // Each address lands in exactly one bucket, so "+N more" applies
-        // per category. Also the display order: New, then Date/Status
-        // changes, then Removed.
-        List<String> newRows = new java.util.ArrayList<>();
-        List<String> dateChangeRows = new java.util.ArrayList<>();
-        List<String> statusChangeRows = new java.util.ArrayList<>();
-        List<String> removedRows = new java.util.ArrayList<>();
+        // Display order: New, then Date/Status changes, then Removed.
+        List<ChangeGroup> newGroups = new java.util.ArrayList<>();
+        List<ChangeGroup> dateChangeGroups = new java.util.ArrayList<>();
+        List<ChangeGroup> statusChangeGroups = new java.util.ArrayList<>();
+        List<ChangeGroup> removedGroups = new java.util.ArrayList<>();
 
         for (List<ChangedListing> group : byAddress.values()) {
             ChangedListing first = group.get(0);
@@ -292,10 +300,6 @@ public class DigestService {
                 continue;
             }
 
-            String dateText = first.auctionDateTime() != null
-                    ? first.auctionDateTime().format(LISTING_META)
-                    : "date unknown";
-
             if (wasRemoved) {
                 // Only announce Removed if this subscriber was actually
                 // emailed before the removal was detected -- otherwise
@@ -313,27 +317,26 @@ public class DigestService {
                 if (!everEmailed) {
                     continue;
                 }
-                removedRows.add(changeRow(first, dateText, "<span class='tag'>%s</span>".formatted(escape("Removed")), "Removed"));
+                removedGroups.add(new ChangeGroup(first, "Removed", List.of("Removed")));
             } else if (wasNew && !hasOtherChangeType) {
-                newRows.add(changeRow(first, dateText, "<span class='tag'>%s</span>".formatted(escape("New")), "New"));
+                newGroups.add(new ChangeGroup(first, "New", List.of("New")));
             } else {
                 // Raw pass-through for whatever's left (price_change, or
                 // any not-yet-recognized event type); date_change gets
                 // special date-only formatting. first_seen, removal
                 // events, and noise status_change are excluded --
                 // handled above or suppressed as not actionable.
-                String labels = group.stream()
+                List<String> labels = group.stream()
                         .filter(change -> !"first_seen".equals(change.eventType())
                                 && !isRemovalEvent(change)
                                 && !isNoiseStatusChange(change))
                         .map(DigestService::formatChangeLabel)
                         .distinct()
-                        .map(l -> "<span class='tag'>%s</span>".formatted(l))
-                        .collect(java.util.stream.Collectors.joining(" "));
+                        .toList();
                 if (wasNew) {
-                    labels = "<span class='tag'>%s</span> ".formatted(escape("New")) + labels;
+                    labels = java.util.stream.Stream.concat(java.util.stream.Stream.of("New"), labels.stream()).toList();
                 }
-                if (labels.isBlank()) {
+                if (labels.isEmpty()) {
                     // Nothing left after filtering noise -- skip rather
                     // than render an empty, unexplained row.
                     continue;
@@ -342,12 +345,44 @@ public class DigestService {
                 // price_change, so an address only appears in one place.
                 boolean hasDateChange = group.stream().anyMatch(c -> "date_change".equals(c.eventType()));
                 String category = hasDateChange ? "Date Changes" : "Status Changes";
-                String row = changeRow(first, dateText, labels, category);
+                ChangeGroup g = new ChangeGroup(first, category, labels);
                 if (hasDateChange) {
-                    dateChangeRows.add(row);
+                    dateChangeGroups.add(g);
                 } else {
-                    statusChangeRows.add(row);
+                    statusChangeGroups.add(g);
                 }
+            }
+        }
+
+        List<ChangeGroup> all = new java.util.ArrayList<>();
+        all.addAll(newGroups);
+        all.addAll(dateChangeGroups);
+        all.addAll(statusChangeGroups);
+        all.addAll(removedGroups);
+        return all;
+    }
+
+    private String renderChanges(List<ChangeGroup> groups, boolean truncate, String viewAllLinkHref) {
+        // Each address lands in exactly one bucket (see buildChangeGroups),
+        // so "+N more" applies per category.
+        List<String> newRows = new java.util.ArrayList<>();
+        List<String> dateChangeRows = new java.util.ArrayList<>();
+        List<String> statusChangeRows = new java.util.ArrayList<>();
+        List<String> removedRows = new java.util.ArrayList<>();
+
+        for (ChangeGroup g : groups) {
+            String dateText = g.listing().auctionDateTime() != null
+                    ? g.listing().auctionDateTime().format(LISTING_META)
+                    : "date unknown";
+            String labelsHtml = g.labels().stream()
+                    .map(l -> "<span class='tag'>%s</span>".formatted(escape(l)))
+                    .collect(java.util.stream.Collectors.joining(" "));
+            String row = changeRow(g.listing(), dateText, labelsHtml, g.category());
+            switch (g.category()) {
+                case "New" -> newRows.add(row);
+                case "Date Changes" -> dateChangeRows.add(row);
+                case "Removed" -> removedRows.add(row);
+                default -> statusChangeRows.add(row);
             }
         }
 
@@ -397,12 +432,17 @@ public class DigestService {
         return TERMINAL_STATUS_KEYWORDS.stream().anyMatch(lower::contains);
     }
 
-    /** date_change gets date-only old -> new; everything else is raw pass-through. */
+    /**
+     * date_change gets date-only old -> new; everything else is raw
+     * pass-through. Returns plain text (not HTML-escaped) so the CSV
+     * export can use it as-is; the HTML renderer escapes at the point
+     * it wraps each label in a <span class='tag'>.
+     */
     private static String formatChangeLabel(ChangedListing change) {
         if ("date_change".equals(change.eventType())) {
-            return escape("%s → %s".formatted(dateOnly(change.oldValue()), dateOnly(change.newValue())));
+            return "%s → %s".formatted(dateOnly(change.oldValue()), dateOnly(change.newValue()));
         }
-        return escape("%s: %s".formatted(change.eventType(), nullToDash(change.newValue())));
+        return "%s: %s".formatted(change.eventType(), nullToDash(change.newValue()));
     }
 
     /** Formats an ISO local datetime string down to just the date. Falls back to the raw value on parse failure. */
@@ -442,10 +482,8 @@ public class DigestService {
             return "<span class='empty'>Coming soon</span>";
         }
 
-        String mapLink = (listing.latitude() != null && listing.longitude() != null)
-                ? " &nbsp;·&nbsp; <a href='%s/auction-scout/?lat=%s&lng=%s&zoom=16'>View map →</a>"
-                .formatted(appBaseUrl, listing.latitude(), listing.longitude())
-                : "";
+        String mapUrl = mapUrl(listing.latitude(), listing.longitude());
+        String mapLink = mapUrl.isEmpty() ? "" : " &nbsp;·&nbsp; <a href='%s'>View map →</a>".formatted(mapUrl);
 
         return "<a href='%s'>View listing →</a>%s".formatted(listing.sourceUrl(), mapLink);
     }
@@ -484,5 +522,85 @@ public class DigestService {
     private static String escape(String s) {
         if (s == null) return "";
         return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+    }
+
+    /** Shared by both the HTML renderer and the JSON DTO builder so the map-link format only lives in one place. */
+    private String mapUrl(Double latitude, Double longitude) {
+        return (latitude != null && longitude != null)
+                ? "%s/auction-scout/?lat=%s&lng=%s&zoom=16".formatted(appBaseUrl, latitude, longitude)
+                : "";
+    }
+
+    /** One row of the "Auctions in the Next 7 Days" section, as data rather than pre-rendered HTML. */
+    public record UpcomingRow(
+            String state,
+            String auctionDateTime, // ISO-8601 local date-time -- client-side sort key
+            String dayLabel,        // e.g. "Monday, July 20"
+            String dateLabel,       // e.g. "07/20 at 10:00 AM"
+            String address,
+            String sourceUrl,
+            String mapUrl           // "" if not geocoded
+    ) {}
+
+    /** One row of the "Status Changes" section, as data rather than pre-rendered HTML. */
+    public record ChangeRow(
+            String state,
+            String category,        // "New" | "Date Changes" | "Status Changes" | "Removed"
+            String address,
+            String auctionDateTime, // ISO-8601 local date-time, or "" if unknown -- client-side sort key
+            String dateLabel,       // e.g. "07/20 at 10:00 AM" or "date unknown"
+            List<String> labels,
+            String sourceUrl,
+            String mapUrl,          // "" if not geocoded
+            boolean linkAvailable   // false once the auction's too far out for a link to stay accurate -- see the old changeLinkCell
+    ) {}
+
+    public record DigestData(List<UpcomingRow> upcoming, List<ChangeRow> changes) {}
+
+    /**
+     * Structured equivalent of renderForSubscriber(email, changesSince,
+     * false) -- same repository calls, same buildChangeGroups rules,
+     * just returned as rows instead of pre-rendered HTML. The watch
+     * page uses this single payload to build both its on-screen DOM and
+     * its CSV exports, so the two can never disagree with each other:
+     * there's nothing left to independently re-derive on either side.
+     * No truncate param -- that concept only applies to the emailed
+     * digest, never to this page.
+     */
+    public DigestData renderForSubscriberAsData(String email, OffsetDateTime changesSince) {
+        List<String> states = subscribers.getStates(email);
+        LocalDateTime now = LocalDateTime.now();
+
+        List<UpcomingListing> upcoming = repository.findUpcoming(states, now, now.plusDays(7));
+        List<UpcomingRow> upcomingRows = upcoming.stream()
+                .filter(l -> l.auctionDateTime() != null)
+                .map(l -> new UpcomingRow(
+                        l.state(),
+                        l.auctionDateTime().toString(),
+                        l.auctionDateTime().format(DAY_HEADER),
+                        l.auctionDateTime().format(LISTING_META),
+                        l.address(),
+                        l.sourceUrl(),
+                        mapUrl(l.latitude(), l.longitude())
+                ))
+                .toList();
+
+        List<ChangedListing> changes = repository.findRecentChanges(states, changesSince);
+        List<ChangeRow> changeRows = buildChangeGroups(changes, email).stream()
+                .map(g -> new ChangeRow(
+                        g.listing().state(),
+                        g.category(),
+                        g.listing().address(),
+                        g.listing().auctionDateTime() != null ? g.listing().auctionDateTime().toString() : "",
+                        g.listing().auctionDateTime() != null ? g.listing().auctionDateTime().format(LISTING_META) : "date unknown",
+                        g.labels(),
+                        g.listing().sourceUrl(),
+                        mapUrl(g.listing().latitude(), g.listing().longitude()),
+                        g.listing().auctionDateTime() != null
+                                && g.listing().auctionDateTime().isBefore(now.plusDays(NEW_LISTING_LINK_WINDOW_DAYS))
+                ))
+                .toList();
+
+        return new DigestData(upcomingRows, changeRows);
     }
 }

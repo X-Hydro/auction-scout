@@ -42,4 +42,22 @@ public class StatusController {
         String html = digestService.renderForSubscriber(email.get(), OffsetDateTime.now().minusDays(7), false);
         return ResponseEntity.ok(html);
     }
+
+    /**
+     * Structured digest data: the same repository calls and
+     * buildChangeGroups rules as getStatus(), just returned as JSON
+     * instead of pre-rendered HTML. The status page builds its own DOM
+     * and its CSV exports off this one payload, so there's nothing left
+     * to independently re-derive that could drift out of sync.
+     */
+    @GetMapping(value = "/status/data", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<DigestService.DigestData> getStatusData(@RequestHeader("X-Session-Token") String sessionToken) {
+        Optional<String> email = subscribers.findEmailBySessionToken(sessionToken);
+        if (email.isEmpty()) {
+            return ResponseEntity.status(401).build();
+        }
+
+        DigestService.DigestData data = digestService.renderForSubscriberAsData(email.get(), OffsetDateTime.now().minusDays(7));
+        return ResponseEntity.ok(data);
+    }
 }
