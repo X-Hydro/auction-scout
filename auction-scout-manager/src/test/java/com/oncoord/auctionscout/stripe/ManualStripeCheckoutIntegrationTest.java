@@ -16,6 +16,7 @@ import java.time.Duration;
 import java.time.Instant;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
@@ -112,6 +113,92 @@ class ManualStripeCheckoutIntegrationTest {
                 // for manual inspection.
             }
             dataSource.destroy();
+        }
+    }
+
+    /**
+     * Covers the other half of SubscriptionController: cancel(). Runs
+     * the same checkout-and-wait-for-webhook sequence as the test
+     * above (a paid, active subscription is a prerequisite for
+     * exercising the "there's a live Stripe subscription to also
+     * cancel" branch in cancel() -- a still-trialing subscriber with no
+     * stripe_subscription_id would only exercise the no-op branch),
+     * then calls POST /subscription/cancel and checks the LOCAL
+     * deactivation only.
+     *
+     * <p>Deliberately does not re-verify the Stripe side (that the
+     * subscription is actually canceled in Stripe's own records) --
+     * that would need Stripe.apiKey set in this test's own JVM, which
+     * only the running app has via StripeConfig. cancel()'s local
+     * deactivate() call is synchronous within the same HTTP request
+     * (no webhook wait needed for this assertion), so watching the
+     * `stripe listen` terminal for a customer.subscription.deleted
+     * event during the run is your visual confirmation of the Stripe
+     * side, same as it was for checkout.
+     */
+    @Test
+    @Disabled("Manual integration test against real Stripe test mode + a running local instance. " +
+            "See class javadoc for setup steps. Re-disable before committing.")
+    void checkoutThenCancel_deactivatesSubscriberLocally() throws Exception {
+        String email = "manual-cancel-test-" + System.currentTimeMillis() + "@example.com";
+        String sessionToken = randomToken();
+
+        SingleConnectionDataSource dataSource =
+                new SingleConnectionDataSource("jdbc:sqlite:" + DB_PATH, true);
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+
+        try {
+            insertVerifiedSubscriber(jdbc, email, sessionToken);
+
+            String checkoutUrl = requestCheckoutUrl(sessionToken);
+
+            System.out.println();
+            System.out.println("=================================================================");
+            System.out.println("Open this URL and complete checkout with a Stripe test card:");
+            System.out.println(checkoutUrl);
+            System.out.println("Test card: 4242 4242 4242 4242, any future expiry, any CVC/zip.");
+            System.out.println("Waiting up to " + POLL_TIMEOUT.toMinutes() + " minutes for the webhook...");
+            System.out.println("=================================================================");
+            System.out.println();
+
+            assertEquals("active", pollForSubscriptionStatus(jdbc, email));
+
+            System.out.println("Subscription active -- now calling POST /subscription/cancel...");
+            requestCancel(sessionToken);
+
+            Integer isActive = jdbc.queryForObject(
+                    "SELECT is_active FROM subscribers WHERE email = ?", Integer.class, email
+            );
+            String remainingSessionToken = jdbc.queryForObject(
+                    "SELECT session_token FROM subscribers WHERE email = ?", String.class, email
+            );
+
+            assertEquals(0, isActive, "is_active should be flipped to 0 by deactivate()");
+            assertNull(remainingSessionToken, "session_token should be revoked by deactivate()");
+
+            System.out.println("Local deactivation confirmed. Check the stripe listen terminal for a " +
+                    "customer.subscription.deleted event to confirm the Stripe side too.");
+        } finally {
+            try {
+                jdbc.update("DELETE FROM subscribers WHERE email = ?", email);
+            } catch (Exception ignored) {
+                // Non-fatal.
+            }
+            dataSource.destroy();
+        }
+    }
+
+    private void requestCancel(String sessionToken) throws Exception {
+        HttpClient client = HttpClient.newHttpClient();
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(APP_BASE_URL + "/subscription/cancel"))
+                .header("X-Session-Token", sessionToken)
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .build();
+
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() != 200) {
+            fail("POST /subscription/cancel returned " + response.statusCode() + ": " + response.body());
         }
     }
 
