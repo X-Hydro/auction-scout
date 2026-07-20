@@ -75,6 +75,14 @@ class ManualStripeCheckoutIntegrationTest {
     private static final Duration POLL_TIMEOUT = Duration.ofMinutes(2);
     private static final Duration POLL_INTERVAL = Duration.ofSeconds(3);
 
+    // Used only by subscribeThenUpdateCardThenCancel_fullLifecycle() --
+    // a real address you can actually check, so Stripe's automatic
+    // emails (subscription confirmation, cancellation) land somewhere
+    // visible instead of a fake @example.com address that just bounces
+    // silently. The other two tests use throwaway generated addresses
+    // since they only assert DB state, not email delivery.
+    private static final String REAL_EMAIL_FOR_TESTING_STRIPE_EMAILS = "thale_jacobs@yahoo.com";
+
     @Test
     @Disabled("Manual integration test against real Stripe test mode + a running local instance. " +
             "See class javadoc for setup steps. Re-disable before committing.")
@@ -140,7 +148,7 @@ class ManualStripeCheckoutIntegrationTest {
     @Disabled("Manual integration test against real Stripe test mode + a running local instance. " +
             "See class javadoc for setup steps. Re-disable before committing.")
     void checkoutThenCancel_deactivatesSubscriberLocally() throws Exception {
-        String email = "manual-cancel-test-" + System.currentTimeMillis() + "@example.com";
+        String email = REAL_EMAIL_FOR_TESTING_STRIPE_EMAILS;
         String sessionToken = randomToken();
 
         SingleConnectionDataSource dataSource =
@@ -148,6 +156,12 @@ class ManualStripeCheckoutIntegrationTest {
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
 
         try {
+            // Defensive: this email is fixed (not timestamp-generated),
+            // so a prior run that didn't reach its own finally block
+            // would otherwise collide with the UNIQUE constraint on
+            // subscribers.email here.
+            jdbc.update("DELETE FROM subscribers WHERE email = ?", email);
+
             insertVerifiedSubscriber(jdbc, email, sessionToken);
 
             String checkoutUrl = requestCheckoutUrl(sessionToken);
@@ -186,6 +200,111 @@ class ManualStripeCheckoutIntegrationTest {
             }
             dataSource.destroy();
         }
+    }
+
+    /**
+     * Walks all three subscriber-facing billing actions against one
+     * subscriber in sequence: subscribe, update payment method via the
+     * Billing Portal, cancel. Combined into one test rather than three
+     * separate ones because steps 2 and 3 both need a subscriber who
+     * already has a live Stripe subscription -- chaining them here
+     * means only one browser checkout is needed for the whole walkthrough,
+     * and the subscriber row persists across all three steps instead of
+     * each test's own cleanup deleting it before the next step could use it.
+     *
+     * <p>Step 2 (Billing Portal) has no local DB assertion -- updating a
+     * card doesn't change any column this app tracks -- so this pauses
+     * for you to actually look at the portal page and optionally update
+     * the card, then press Enter in the console to continue to step 3.
+     * Skipping the actual card update and just pressing Enter
+     * immediately still exercises portal session creation, which is the
+     * part of our own code this test can verify either way.
+     */
+    @Test
+    @Disabled("Manual integration test against real Stripe test mode + a running local instance. " +
+           "See class javadoc for setup steps. Re-disable before committing.")
+    void subscribeThenUpdateCardThenCancel_fullLifecycle() throws Exception {
+        String email = REAL_EMAIL_FOR_TESTING_STRIPE_EMAILS;
+        String sessionToken = randomToken();
+
+        SingleConnectionDataSource dataSource =
+                new SingleConnectionDataSource("jdbc:sqlite:" + DB_PATH, true);
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+
+        try {
+            // Defensive: this email is fixed (not timestamp-generated
+            // like the other two tests), so a prior run that didn't
+            // reach its own finally block (e.g. the JVM was killed
+            // mid-test) would otherwise collide with the UNIQUE
+            // constraint on subscribers.email here.
+            jdbc.update("DELETE FROM subscribers WHERE email = ?", email);
+
+            insertVerifiedSubscriber(jdbc, email, sessionToken);
+
+            // --- Step 1: subscribe ---
+            String checkoutUrl = requestCheckoutUrl(sessionToken);
+            System.out.println();
+            System.out.println("=================================================================");
+            System.out.println("STEP 1/3 -- Open this URL and complete checkout with a Stripe test card:");
+            System.out.println(checkoutUrl);
+            System.out.println("Test card: 4242 4242 4242 4242, any future expiry, any CVC/zip.");
+            System.out.println("Waiting up to " + POLL_TIMEOUT.toMinutes() + " minutes for the webhook...");
+            System.out.println("=================================================================");
+            System.out.println();
+
+            assertEquals("active", pollForSubscriptionStatus(jdbc, email));
+            System.out.println("Subscription active. Check Stripe Dashboard > Customers > " + email +
+                    " for a subscription-confirmation email attempt.");
+
+            // --- Step 2: update payment method via Billing Portal ---
+            String portalUrl = requestBillingPortalUrl(sessionToken);
+            System.out.println();
+            System.out.println("=================================================================");
+            System.out.println("STEP 2/3 -- Open this URL to update the payment method:");
+            System.out.println(portalUrl);
+            System.out.println("Optional: actually update the card.");
+            System.out.println("Pausing 60 seconds to give you time to look at the page, then " +
+                    "continuing automatically to step 3 (cancel).");
+            System.out.println("=================================================================");
+            System.out.println();
+            Thread.sleep(Duration.ofSeconds(60).toMillis());
+
+            // --- Step 3: cancel ---
+            System.out.println("Calling POST /subscription/cancel...");
+            requestCancel(sessionToken);
+
+            Integer isActive = jdbc.queryForObject(
+                    "SELECT is_active FROM subscribers WHERE email = ?", Integer.class, email
+            );
+            assertEquals(0, isActive, "is_active should be flipped to 0 by deactivate()");
+            System.out.println("STEP 3/3 -- Cancellation confirmed locally. Check Stripe Dashboard > " +
+                    "Customers > " + email + " for a cancellation-confirmation email attempt, and the " +
+                    "stripe listen terminal for customer.subscription.deleted.");
+        } finally {
+            try {
+                jdbc.update("DELETE FROM subscribers WHERE email = ?", email);
+            } catch (Exception ignored) {
+                // Non-fatal.
+            }
+            dataSource.destroy();
+        }
+    }
+
+    private String requestBillingPortalUrl(String sessionToken) throws Exception {
+        HttpClient client = HttpClient.newHttpClient();
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(APP_BASE_URL + "/subscription/billing-portal"))
+                .header("X-Session-Token", sessionToken)
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .build();
+
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() != 200) {
+            fail("POST /subscription/billing-portal returned " + response.statusCode() + ": " + response.body());
+        }
+
+        JsonNode body = new ObjectMapper().readTree(response.body());
+        return body.get("url").asText();
     }
 
     private void requestCancel(String sessionToken) throws Exception {
