@@ -70,23 +70,28 @@ public class SubscriberRepository {
      * small improvement over the strict oncoord-manager pattern: it
      * means an old, possibly-leaked link can't be replayed to recover a
      * still-valid session after a new one's been issued.
-     */
-    /**
+     *
      * Returns empty if no subscriber row matched the email -- e.g. a
      * token issued for an address that was never actually registered
      * (test-send to an arbitrary address, or a stale/tampered token).
-     * Previously this generated and returned a token unconditionally,
-     * even when the UPDATE affected zero rows -- the caller (verify())
-     * would then report success with a session token that was never
-     * actually persisted anywhere, which silently fails one step later
-     * when that token gets used and matches nothing.
+     *
+     * Also starts the trial clock here (subscription_start_date), via
+     * COALESCE so re-verifying doesn't reset it. This has to happen at
+     * verification, not at first preferences save: HAS_ACCESS_CLAUSE
+     * (see findEmailBySessionToken) requires subscription_start_date to
+     * already be set, and preferences save itself requires passing
+     * findEmailBySessionToken first -- setting it any later than this
+     * makes a fresh subscriber unable to ever reach the one action that
+     * would set it, a real deadlock this fixes.
      */
     public Optional<String> markVerifiedAndIssueSessionToken(String email) {
         String token = generateToken();
+        long now = System.currentTimeMillis();
         int rowsUpdated = jdbc.update(
                 "UPDATE subscribers SET verified_at = ?, is_active = 1, session_token = ?, " +
-                        "subscription_end_date = NULL WHERE email = ?",
-                System.currentTimeMillis(), token, email
+                        "subscription_end_date = NULL, subscription_start_date = COALESCE(subscription_start_date, ?) " +
+                        "WHERE email = ?",
+                now, token, now, email
         );
         return rowsUpdated > 0 ? Optional.of(token) : Optional.empty();
     }

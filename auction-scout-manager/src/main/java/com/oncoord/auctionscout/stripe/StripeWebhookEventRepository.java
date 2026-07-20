@@ -31,11 +31,24 @@ public class StripeWebhookEventRepository {
      * deliveries of the same event both reaching this line before either
      * commits shouldn't throw a constraint violation up to the caller --
      * the event is marked processed either way.
+     *
+     * eventType and email are both nullable: email in particular is
+     * only known when a handler actually resolved a subscriber for
+     * this event (e.g. checkout.session.completed, invoice.paid) --
+     * events StripeWebhookController ignores (the "default" case) have
+     * no subscriber attached and record NULL here, which is expected,
+     * not a bug.
      */
-    public void markProcessed(String eventId) {
+    public void markProcessed(String eventId, String eventType, String email) {
         jdbc.update(
-                "INSERT OR IGNORE INTO stripe_webhook_events (event_id, processed_at) VALUES (?, ?)",
-                eventId, System.currentTimeMillis()
+                "INSERT OR IGNORE INTO stripe_webhook_events (event_id, processed_at, event_type, email) " +
+                        "VALUES (?, ?, ?, ?)",
+                eventId, System.currentTimeMillis(), eventType, email
         );
+    }
+
+    /** Overload for callers that don't have an event type or email to record. */
+    public void markProcessed(String eventId) {
+        markProcessed(eventId, null, null);
     }
 }

@@ -67,5 +67,21 @@ CREATE INDEX IF NOT EXISTS idx_email_notifications_email_sent_at
 -- recordStripeSubscription() twice for one checkout.
 CREATE TABLE IF NOT EXISTS stripe_webhook_events (
      event_id TEXT PRIMARY KEY,
-     processed_at INTEGER NOT NULL
+     processed_at INTEGER NOT NULL,
+     event_type TEXT,
+     email TEXT
 );
+
+CREATE TABLE IF NOT EXISTS invoices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL REFERENCES subscribers(email),
+    invoice_date INTEGER NOT NULL,
+    amount_cents INTEGER NOT NULL DEFAULT 0,
+    status TEXT DEFAULT 'paid',
+    description TEXT,
+    created_at INTEGER NOT NULL,
+    payment_reference TEXT,
+    payment_last4 TEXT,
+    stripe_invoice_id TEXT UNIQUE
+    );
+

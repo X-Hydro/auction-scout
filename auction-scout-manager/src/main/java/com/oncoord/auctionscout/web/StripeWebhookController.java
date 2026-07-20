@@ -2,11 +2,13 @@ package com.oncoord.auctionscout.web;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.oncoord.auctionscout.invoice.InvoiceRepository;
 import com.oncoord.auctionscout.subscriber.SubscriberRepository;
 import com.oncoord.auctionscout.stripe.StripeWebhookEventRepository;
 import com.stripe.exception.SignatureVerificationException;
 import com.stripe.exception.StripeException;
 import com.stripe.model.Event;
+import com.stripe.model.Invoice;
 import com.stripe.model.Subscription;
 import com.stripe.model.checkout.Session;
 import com.stripe.net.Webhook;
@@ -27,13 +29,11 @@ import org.springframework.web.bind.annotation.RestController;
  * header against auctionscout.stripe.webhook-secret, which only Stripe
  * and this server know.
  *
- * The three events registered on the Stripe dashboard endpoint should
- * be: checkout.session.completed, customer.subscription.updated, and
- * customer.subscription.deleted. Anything else received is
- * acknowledged (200) and ignored, since Stripe retries on non-2xx and
- * we don't want unrelated event types (e.g. invoice.* if someone later
- * enables more events in the dashboard without updating this code)
- * causing retry storms.
+ * The four events registered on the Stripe dashboard endpoint should
+ * be: checkout.session.completed, customer.subscription.updated,
+ * customer.subscription.deleted, and invoice.paid. Anything else
+ * received is acknowledged (200) and ignored, since Stripe retries on
+ * non-2xx and we don't want unrelated event types causing retry storms.
  *
  * Deliberately does NOT rely on event.getDataObjectDeserializer().
  * getObject()'s typed deserialization of the webhook payload itself --
@@ -45,6 +45,12 @@ import org.springframework.web.bind.annotation.RestController;
  * ID out of the raw JSON and re-fetches the object via a live retrieve()
  * call, which always uses this SDK's own compiled-in API version and
  * so can't hit that mismatch.
+ *
+ * Each handler returns the subscriber email it resolved (or null, if
+ * none) so handle() can record it on the stripe_webhook_events row --
+ * makes "which webhook events touched this customer" a plain query
+ * against that table instead of needing to reconstruct it from
+ * invoices/subscription state later.
  */
 @RestController
 public class StripeWebhookController {
@@ -52,13 +58,16 @@ public class StripeWebhookController {
     private static final Logger log = LoggerFactory.getLogger(StripeWebhookController.class);
 
     private final SubscriberRepository subscribers;
+    private final InvoiceRepository invoices;
     private final StripeWebhookEventRepository processedEvents;
     private final String webhookSecret;
 
     public StripeWebhookController(SubscriberRepository subscribers,
+                                   InvoiceRepository invoices,
                                    StripeWebhookEventRepository processedEvents,
                                    @Value("${auctionscout.stripe.webhook-secret}") String webhookSecret) {
         this.subscribers = subscribers;
+        this.invoices = invoices;
         this.processedEvents = processedEvents;
         this.webhookSecret = webhookSecret;
     }
@@ -82,66 +91,130 @@ public class StripeWebhookController {
 
         log.info("Processing Stripe event {} ({})", event.getId(), event.getType());
 
+        String resolvedEmail;
         try {
-            switch (event.getType()) {
+            resolvedEmail = switch (event.getType()) {
                 case "checkout.session.completed" -> handleCheckoutCompleted(event);
                 case "customer.subscription.updated" -> handleSubscriptionUpdated(event);
                 case "customer.subscription.deleted" -> handleSubscriptionDeleted(event);
-                default -> log.info("Ignoring unhandled Stripe event type {}", event.getType());
-            }
+                case "invoice.paid" -> handleInvoicePaid(event);
+                default -> {
+                    log.info("Ignoring unhandled Stripe event type {}", event.getType());
+                    yield null;
+                }
+            };
         } catch (StripeException e) {
             log.error("Failed to process Stripe event {} ({})", event.getId(), event.getType(), e);
             return ResponseEntity.status(500).body("Failed to process event");
         }
 
-        processedEvents.markProcessed(event.getId());
+        processedEvents.markProcessed(event.getId(), event.getType(), resolvedEmail);
         return ResponseEntity.ok().build();
     }
 
-    private void handleCheckoutCompleted(Event event) throws StripeException {
+    private String handleCheckoutCompleted(Event event) throws StripeException {
         String sessionId = extractRawId(event);
         if (sessionId == null) {
             log.warn("checkout.session.completed event {} had no session id in its raw payload", event.getId());
-            return;
+            return null;
         }
 
         Session session = Session.retrieve(sessionId);
         String email = session.getClientReferenceId();
         if (email == null) {
             log.warn("checkout.session.completed for session {} had no client_reference_id", sessionId);
-            return;
+            return null;
         }
 
         subscribers.recordStripeSubscription(email, session.getCustomer(), session.getSubscription());
         log.info("Recorded Stripe subscription for {} (customer={}, subscription={})",
                 email, session.getCustomer(), session.getSubscription());
+        return email;
     }
 
-    private void handleSubscriptionUpdated(Event event) throws StripeException {
+    private String handleSubscriptionUpdated(Event event) throws StripeException {
         String subscriptionId = extractRawId(event);
         if (subscriptionId == null) {
             log.warn("customer.subscription.updated event {} had no subscription id in its raw payload",
                     event.getId());
-            return;
+            return null;
         }
 
         Subscription subscription = Subscription.retrieve(subscriptionId);
         subscribers.updateStripeSubscriptionStatus(subscription.getId(), subscription.getStatus());
         log.info("Updated Stripe subscription {} status to {}", subscription.getId(), subscription.getStatus());
+        return subscribers.findEmailByStripeSubscriptionId(subscription.getId()).orElse(null);
     }
 
-    private void handleSubscriptionDeleted(Event event) throws StripeException {
+    private String handleSubscriptionDeleted(Event event) throws StripeException {
         String subscriptionId = extractRawId(event);
         if (subscriptionId == null) {
             log.warn("customer.subscription.deleted event {} had no subscription id in its raw payload",
                     event.getId());
-            return;
+            return null;
         }
 
-        subscribers.findEmailByStripeSubscriptionId(subscriptionId).ifPresentOrElse(
-                subscribers::deactivate,
-                () -> log.warn("customer.subscription.deleted for {} matched no known subscriber", subscriptionId)
-        );
+        // Resolve the email before deactivate() runs, not after -- once
+        // it's deactivated there's nothing that changes about looking
+        // it up by subscription id, but resolving first keeps the
+        // "did we find a match" log and the returned email consistent
+        // with each other in one place, in case that ever needs to
+        // change.
+        return subscribers.findEmailByStripeSubscriptionId(subscriptionId)
+                .map(email -> {
+                    subscribers.deactivate(email);
+                    return email;
+                })
+                .orElseGet(() -> {
+                    log.warn("customer.subscription.deleted for {} matched no known subscriber", subscriptionId);
+                    return null;
+                });
+    }
+
+    private String handleInvoicePaid(Event event) throws StripeException {
+        String invoiceId = extractRawId(event);
+        if (invoiceId == null) {
+            log.warn("invoice.paid event {} had no invoice id in its raw payload", event.getId());
+            return null;
+        }
+
+        Invoice invoice = Invoice.retrieve(invoiceId);
+
+        // As of stripe-java 33.x, Invoice no longer has a direct
+        // getSubscription() -- it was restructured under getParent()
+        // to support other invoice sources (e.g. quotes) alongside
+        // subscriptions. getParent() and getSubscriptionDetails() can
+        // each be null (a one-off invoice, or a quote-originated one),
+        // so this has to be checked at every step rather than chained
+        // straight through.
+        Invoice.Parent parent = invoice.getParent();
+        Invoice.Parent.SubscriptionDetails subscriptionDetails =
+                parent != null ? parent.getSubscriptionDetails() : null;
+        String subscriptionId = subscriptionDetails != null ? subscriptionDetails.getSubscription() : null;
+
+        if (subscriptionId == null) {
+            // Not a subscription invoice (e.g. a one-off charge, or a
+            // quote-originated invoice) -- nothing for this app to
+            // attribute it to.
+            log.info("invoice.paid for {} has no subscription -- skipping (not a subscription invoice)",
+                    invoiceId);
+            return null;
+        }
+
+        String email = subscribers.findEmailByStripeSubscriptionId(subscriptionId).orElse(null);
+        if (email == null) {
+            log.warn("invoice.paid for {} (subscription {}) matched no known subscriber",
+                    invoiceId, subscriptionId);
+            return null;
+        }
+
+        long amountCents = invoice.getAmountPaid() != null ? invoice.getAmountPaid() : 0L;
+        long invoiceDate = invoice.getCreated() != null ? invoice.getCreated() * 1000 : System.currentTimeMillis();
+
+        invoices.recordInvoice(email, invoice.getId(), amountCents, invoice.getStatus(),
+                invoiceDate, "AuctionScout subscription", "STRIPE-" + event.getId(), null);
+        log.info("Recorded invoice {} for {} (amount={} cents)", invoice.getId(), email, amountCents);
+        return email;
     }
 
     /**
