@@ -25,6 +25,7 @@ from spiders.brockscott import BrockScottSpider
 from spiders.jjmanning import JJManningSpider
 from spiders.towne import TowneAuctionSpider
 from spiders.patriot import PatriotSpider
+from spiders.skypoint import SkypointSpider
 from base import DEFAULT_OVERRIDES_PATH
 from geocode import reverse_geocode_geography, geocode_with_fallbacks
 
@@ -37,6 +38,7 @@ REGISTRY = {
     "jjmanning": JJManningSpider,
     "towne": TowneAuctionSpider,
     "patriot": PatriotSpider,
+    "skypoint": SkypointSpider,
 }
 
 # Spiders that exist as a stub but are intentionally not runnable yet

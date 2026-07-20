@@ -55,6 +55,16 @@ def extract_listing_id(url: str, address: str = "") -> str:
     instead — mirroring the Towne spider's own internal use of an
     address-derived slug for the same reason.
 
+    Special case: skypointauctions.com has the same "no per-listing URL"
+    problem as Towne (every row's URL is the same homepage) but, unlike
+    Towne, DOES have a real, stable native id printed on the page itself
+    ("#2653", "SP #2513", sub-lot suffixes like "#2649A"/"#2649B").
+    spiders/skypoint.py encodes that id into a URL fragment
+    (".../#2653") specifically so it can be recovered here — preferred
+    over an address-derived slug because the id is stable even if the
+    site's address text is later edited/corrected, whereas a slug would
+    silently start a new "listing" the moment the address string changed.
+
     Unconfirmed sources (JJManning, Brock & Scott) fall through to the
     generic ?id= attempt, then to the full URL as a last resort — dedup
     still works correctly either way (the URL itself is unique and
@@ -72,6 +82,9 @@ def extract_listing_id(url: str, address: str = "") -> str:
 
     if "towneauction.com" in domain:
         return _slugify(address) if address else url
+
+    if "skypointauctions.com" in domain and parsed.fragment:
+        return parsed.fragment
 
     # sullivan-auctioneers.com, patriotauctioneers.com, and any other/future
     # source using a plain ?id= param all fall through to here.

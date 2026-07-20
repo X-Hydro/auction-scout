@@ -24,7 +24,7 @@ import java.util.Locale;
  * interpreting them into a fixed vocabulary (see
  * PropertyDigestRepository's javadoc for why).
  *
- * renderForSubscriber() is the shared entry point for both the watch
+ * renderForSubscriber() is the shared entry point for both the status
  * page and the scheduled email job. `truncate` is how they differ:
  * false shows everything (watch page), true caps each section at a
  * few rows with "+N more" links (email).
@@ -42,7 +42,7 @@ public class DigestService {
     // - first_seen_at) before it's shown at all.
     private static final int SEASONING_WINDOW_DAYS = 7;
 
-    // Email section caps, only applied when truncate=true. The watch
+    // Email section caps, only applied when truncate=true. The status
     // page (truncate=false) always shows everything.
     private static final int MAX_LISTINGS_PER_DAY = 5;
     private static final int MAX_CHANGES_PER_BUCKET = 5;
@@ -560,7 +560,7 @@ public class DigestService {
     /**
      * Structured equivalent of renderForSubscriber(email, changesSince,
      * false) -- same repository calls, same buildChangeGroups rules,
-     * just returned as rows instead of pre-rendered HTML. The watch
+     * just returned as rows instead of pre-rendered HTML. The status
      * page uses this single payload to build both its on-screen DOM and
      * its CSV exports, so the two can never disagree with each other:
      * there's nothing left to independently re-derive on either side.

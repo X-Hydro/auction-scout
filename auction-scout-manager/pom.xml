@@ -1,6 +1,6 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0"
-  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
          http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
@@ -48,7 +48,7 @@
       <version>1.18.32</version>
       <scope>provided</scope>
     </dependency>
-    
+
     <!-- Optional: Spring Boot Test -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
@@ -83,7 +83,7 @@
     <dependency>
       <groupId>com.stripe</groupId>
       <artifactId>stripe-java</artifactId>
-      <version>27.0.0</version>
+      <version>33.1.0</version>
     </dependency>
 
     <dependency>
@@ -91,7 +91,6 @@
       <artifactId>oncoord-auth-common</artifactId>
       <version>0.1.0-SNAPSHOT</version>
     </dependency>
-
 
   </dependencies>
 
@@ -106,4 +105,3 @@
     </plugins>
   </build>
 </project>
-

@@ -43,6 +43,7 @@ import shutil
 EXCLUDED_STATUSES = (
     "sold back to mortgagee",
     "3rd party purchase",
+    "sold",
     "canceled",
     "cancelled",
     "withdrawn",
@@ -263,4 +264,3 @@ if __name__ == "__main__":
     shutil.copy2(json_path, json_backup)
     db_backup = Path(f"{db_path}.{date.today():%Y.%m.%d}")
     shutil.copy2(db_path, db_backup)
-
