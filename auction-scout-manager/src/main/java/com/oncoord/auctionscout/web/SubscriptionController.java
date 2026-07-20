@@ -19,8 +19,8 @@ import java.util.Optional;
  * Cancel-subscription is deliberately its own controller rather than a
  * third method on PreferencesController: it's a destructive, one-way-
  * feeling action with different UX and billing implications, not a
- * preference being saved. Checkout lives here too since it's the other
- * half of the same subscription lifecycle.
+ * preference being saved. Checkout and the billing portal live here
+ * too since they're all part of the same subscription lifecycle.
  *
  * Stripe is wired up as of this cancel() -- see
  * SubscriberRepository.deactivate() for what actually happens to the
@@ -29,6 +29,15 @@ import java.util.Optional;
  * customer.subscription.deleted event, so a subscriber cancelled
  * either from our UI or directly from Stripe's own portal ends up in
  * the same place.
+ *
+ * billingPortal() is deliberately kept separate from cancel() rather
+ * than letting the portal handle cancellation too (Stripe's default
+ * portal configuration supports both) -- our own /subscription/cancel
+ * button stays the one cancellation path; the portal here is scoped to
+ * payment-method updates and invoice history only. Whether the portal
+ * configuration in the Stripe Dashboard also exposes a cancel option is
+ * a Dashboard setting, not something this code enforces -- worth
+ * checking that setting matches this intent.
  */
 @RestController
 public class SubscriptionController {
@@ -103,5 +112,41 @@ public class SubscriptionController {
         return ResponseEntity.ok(Map.of(
                 "message", "Your subscription has been cancelled."
         ));
+    }
+
+    /**
+     * Creates a Stripe Billing Portal session and returns its hosted URL
+     * so the frontend can redirect the subscriber there to update their
+     * payment method (and view invoice history, which the portal shows
+     * by default). Unlike checkout(), this requires a Stripe customer to
+     * already exist -- a subscriber who's never completed checkout
+     * (still trialing, or lapsed with no payment attempt) has nothing
+     * to manage yet, so this returns 400 rather than trying to create a
+     * portal session with no customer to scope it to.
+     */
+    @PostMapping("/subscription/billing-portal")
+    public ResponseEntity<?> billingPortal(@RequestHeader("X-Session-Token") String sessionToken)
+            throws StripeException {
+        Optional<String> email = subscribers.findEmailBySessionToken(sessionToken);
+        if (email.isEmpty()) {
+            return ResponseEntity.status(401).body(Map.of("error", "Invalid or expired session"));
+        }
+
+        Optional<String> stripeCustomerId = subscribers.findStripeCustomerIdByEmail(email.get());
+        if (stripeCustomerId.isEmpty()) {
+            return ResponseEntity.status(400).body(Map.of(
+                    "error", "No billing account on file yet -- subscribe first"
+            ));
+        }
+
+        com.stripe.param.billingportal.SessionCreateParams params =
+                com.stripe.param.billingportal.SessionCreateParams.builder()
+                        .setCustomer(stripeCustomerId.get())
+                        .setReturnUrl(appBaseUrl + "/preferences.html")
+                        .build();
+
+        com.stripe.model.billingportal.Session portalSession =
+                com.stripe.model.billingportal.Session.create(params);
+        return ResponseEntity.ok(Map.of("url", portalSession.getUrl()));
     }
 }

@@ -270,6 +270,22 @@ public class SubscriberRepository {
         );
     }
 
+    /**
+     * Used by SubscriptionController.billingPortal() -- a Billing Portal
+     * session is scoped to a Stripe customer, not a subscription, so
+     * this is looked up separately from findStripeSubscriptionIdByEmail().
+     * Empty for a subscriber who's never completed checkout (still
+     * trialing, or trial lapsed with no payment attempt) -- there's no
+     * Stripe customer record to send them to a portal for yet.
+     */
+    public Optional<String> findStripeCustomerIdByEmail(String email) {
+        return jdbc.query(
+                "SELECT stripe_customer_id FROM subscribers WHERE email = ?",
+                rs -> rs.next() ? Optional.ofNullable(rs.getString("stripe_customer_id")) : Optional.empty(),
+                email
+        );
+    }
+
     public List<String> getStates(String email) {
         return jdbc.queryForList(
                 "SELECT s.state FROM subscriber_states s " +
