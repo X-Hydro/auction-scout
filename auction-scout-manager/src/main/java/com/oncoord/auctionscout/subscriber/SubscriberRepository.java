@@ -22,6 +22,7 @@ import java.util.Optional;
 public class SubscriberRepository {
 
     private static final int MAX_STATES_PER_SUBSCRIBER = 4;
+    private static final long TRIAL_LENGTH_MILLIS = 30L * 24 * 60 * 60 * 1000;
     private static final SecureRandom RANDOM = new SecureRandom();
 
     private final JdbcTemplate jdbc;
@@ -29,6 +30,20 @@ public class SubscriberRepository {
     public SubscriberRepository(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
     }
+
+    /**
+     * Appended to is_active = 1 anywhere access needs to be trial-or-
+     * paid-gated (session lookup, weekly send list): true if either the
+     * subscriber is within 30 days of subscription_start_date, or
+     * Stripe has told us (via webhook) that a subscription is active.
+     * A NULL subscription_start_date (shouldn't happen for is_active=1
+     * rows, since it's set alongside verification) is treated as
+     * expired rather than open-ended.
+     */
+    private static final String HAS_ACCESS_CLAUSE =
+            "(stripe_subscription_status = 'active' " +
+                    "OR (subscription_start_date IS NOT NULL " +
+                    "AND ? < subscription_start_date + " + TRIAL_LENGTH_MILLIS + "))";
 
     public boolean existsByEmail(String email) {
         Integer count = jdbc.queryForObject(
@@ -76,14 +91,22 @@ public class SubscriberRepository {
         return rowsUpdated > 0 ? Optional.of(token) : Optional.empty();
     }
 
+    /**
+     * Empty if the token doesn't match an active row, OR if it matches
+     * one whose trial has lapsed with no active Stripe subscription --
+     * same "not logged in" response either way, so an expired-trial
+     * subscriber gets bounced back to a resubscribe prompt rather than
+     * a confusing partial session.
+     */
     public Optional<String> findEmailBySessionToken(String sessionToken) {
         if (sessionToken == null || sessionToken.isBlank()) {
             return Optional.empty();
         }
         return jdbc.query(
-                "SELECT email FROM subscribers WHERE session_token = ? AND is_active = 1",
+                "SELECT email FROM subscribers WHERE session_token = ? AND is_active = 1 " +
+                        "AND " + HAS_ACCESS_CLAUSE,
                 rs -> rs.next() ? Optional.of(rs.getString("email")) : Optional.empty(),
-                sessionToken
+                sessionToken, System.currentTimeMillis()
         );
     }
 
@@ -132,8 +155,10 @@ public class SubscriberRepository {
      */
     public List<ActiveSubscriber> findActiveWithAlertsEnabled() {
         return jdbc.query(
-                "SELECT id, email FROM subscribers WHERE is_active = 1 AND email_alerts_enabled = 1",
-                (rs, rowNum) -> new ActiveSubscriber(rs.getInt("id"), rs.getString("email"))
+                "SELECT id, email FROM subscribers WHERE is_active = 1 AND email_alerts_enabled = 1 " +
+                        "AND " + HAS_ACCESS_CLAUSE,
+                (rs, rowNum) -> new ActiveSubscriber(rs.getInt("id"), rs.getString("email")),
+                System.currentTimeMillis()
         );
     }
 
@@ -186,6 +211,65 @@ public class SubscriberRepository {
         );
     }
 
+    /**
+     * Called from the checkout.session.completed webhook handler once
+     * Stripe confirms payment. Stores both IDs so a later subscription-
+     * lifecycle webhook (which carries the subscription ID, not the
+     * subscriber's email) can find its way back to this row via
+     * findEmailByStripeSubscriptionId(). Status is set to 'active' here
+     * rather than waiting for a follow-up customer.subscription.created
+     * event, since checkout.session.completed already implies that.
+     */
+    public void recordStripeSubscription(String email, String stripeCustomerId, String stripeSubscriptionId) {
+        jdbc.update(
+                "UPDATE subscribers SET stripe_customer_id = ?, stripe_subscription_id = ?, " +
+                        "stripe_subscription_status = 'active' WHERE email = ?",
+                stripeCustomerId, stripeSubscriptionId, email
+        );
+    }
+
+    /**
+     * Called from customer.subscription.updated -- just mirrors
+     * whatever status string Stripe sent (see HAS_ACCESS_CLAUSE javadoc
+     * for why only 'active' grants access; 'past_due', 'unpaid', etc.
+     * fall through to the trial-window check, which by this point has
+     * usually already expired).
+     */
+    public void updateStripeSubscriptionStatus(String stripeSubscriptionId, String status) {
+        jdbc.update(
+                "UPDATE subscribers SET stripe_subscription_status = ? WHERE stripe_subscription_id = ?",
+                status, stripeSubscriptionId
+        );
+    }
+
+    /**
+     * Resolves a subscription-lifecycle webhook (which identifies the
+     * subscriber only by Stripe IDs) back to the subscriber's email, so
+     * the caller can then reuse findEmailBySessionToken-adjacent logic
+     * or call deactivate() on a customer.subscription.deleted event.
+     */
+    /**
+     * Used by SubscriptionController.cancel() to decide whether there's
+     * a live Stripe subscription that also needs cancelling (paid
+     * subscriber) or not (still-trialing subscriber cancelling early --
+     * nothing on the Stripe side to touch).
+     */
+    public Optional<String> findStripeSubscriptionIdByEmail(String email) {
+        return jdbc.query(
+                "SELECT stripe_subscription_id FROM subscribers WHERE email = ?",
+                rs -> rs.next() ? Optional.ofNullable(rs.getString("stripe_subscription_id")) : Optional.empty(),
+                email
+        );
+    }
+
+    public Optional<String> findEmailByStripeSubscriptionId(String stripeSubscriptionId) {
+        return jdbc.query(
+                "SELECT email FROM subscribers WHERE stripe_subscription_id = ?",
+                rs -> rs.next() ? Optional.of(rs.getString("email")) : Optional.empty(),
+                stripeSubscriptionId
+        );
+    }
+
     public List<String> getStates(String email) {
         return jdbc.queryForList(
                 "SELECT s.state FROM subscriber_states s " +
@@ -217,6 +301,16 @@ public class SubscriberRepository {
         if (subscriberId == null) {
             throw new IllegalArgumentException("No verified subscriber for email: " + email);
         }
+
+        // COALESCE, not a plain SET: this only needs to fire once, the
+        // first time a subscriber ever saves states. Without it, every
+        // subsequent preferences edit would push subscription_start_date
+        // forward and the trial window would never actually close.
+        jdbc.update(
+                "UPDATE subscribers SET subscription_start_date = " +
+                        "COALESCE(subscription_start_date, ?) WHERE id = ?",
+                System.currentTimeMillis(), subscriberId
+        );
 
         jdbc.update("DELETE FROM subscriber_states WHERE subscriber_id = ?", subscriberId);
         for (String state : states) {
