@@ -434,4 +434,41 @@ public class SubscriberRepository {
         }
         return hex.toString();
     }
+
+
+    /**
+     * Raw Stripe status string ('trialing', 'active', 'canceled', etc.) --
+     * needed to pick which of the three subscription-status messages to
+     * show on preferences.html. hasActiveStripeSubscription() only
+     * returns a boolean, not enough to distinguish the states from each
+     * other.
+     */
+    public Optional<String> findSubscriptionStatusByEmail(String email) {
+        return jdbc.query(
+                "SELECT stripe_subscription_status FROM subscribers WHERE email = ?",
+                rs -> rs.next() ? Optional.ofNullable(rs.getString("stripe_subscription_status")) : Optional.empty(),
+                email
+        );
+    }
+
+    /**
+     * Mirrors findSubscriptionStartDateByEmail() -- set by deactivate()
+     * when a subscriber cancels. Unlike trial-end/renewal dates, this one
+     * doesn't need a Stripe call: it's already the local source of truth
+     * for "when does a canceled subscriber's access actually end."
+     */
+    public Optional<Long> findSubscriptionEndDateByEmail(String email) {
+        return jdbc.query(
+                "SELECT subscription_end_date FROM subscribers WHERE email = ?",
+                rs -> {
+                    if (!rs.next()) return Optional.empty();
+                    long v = rs.getLong("subscription_end_date");
+                    return rs.wasNull() ? Optional.<Long>empty() : Optional.of(v);
+                },
+                email
+        );
+    }
+
+
+
 }
