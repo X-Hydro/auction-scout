@@ -211,6 +211,47 @@ public class SubscriptionController {
     }
 
     /**
+     * Undoes a pending cancellation -- the counterpart to cancel()'s
+     * cancel-at-period-end branch. Only meaningful while the subscriber
+     * is still within their trial/paid period (cancel_at_period_end is
+     * true but the subscription hasn't actually ended yet); once
+     * StripeWebhookController's customer.subscription.deleted handler
+     * has already fired and deactivate() has run, there's nothing left
+     * to resume -- they'd need a fresh checkout() instead, which this
+     * endpoint deliberately doesn't fall back to, so a stale request
+     * against an already-ended subscription fails loudly rather than
+     * silently creating a second one.
+     *
+     * Doesn't change trial_end or current_period_end -- the Stripe
+     * subscription was never actually cancelled, just flagged to stop
+     * at period end, so unsetting that flag resumes exactly the
+     * subscription that already existed, same dates and all.
+     */
+    @PostMapping("/subscription/resume")
+    public ResponseEntity<?> resume(@RequestHeader("X-Session-Token") String sessionToken) throws StripeException {
+        Optional<String> email = subscribers.findEmailByActiveSessionToken(sessionToken);
+        if (email.isEmpty()) {
+            return ResponseEntity.status(401).body(Map.of("error", "Invalid or expired session"));
+        }
+
+        Optional<String> stripeSubscriptionId = subscribers.findStripeSubscriptionIdByEmail(email.get());
+        if (stripeSubscriptionId.isEmpty() || !subscribers.hasActiveStripeSubscription(email.get())) {
+            return ResponseEntity.status(400).body(Map.of(
+                    "error", "No active subscription to resume -- start a new one instead"
+            ));
+        }
+
+        Subscription.retrieve(stripeSubscriptionId.get())
+                .update(SubscriptionUpdateParams.builder()
+                        .setCancelAtPeriodEnd(false)
+                        .build());
+
+        return ResponseEntity.ok(Map.of(
+                "message", "Your subscription will continue as scheduled."
+        ));
+    }
+
+    /**
      * Creates a Stripe Billing Portal session and returns its hosted URL
      * so the frontend can redirect the subscriber there to update their
      * payment method (and view invoice history, which the portal shows

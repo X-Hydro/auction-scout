@@ -60,10 +60,16 @@ public class PreferencesController {
 
         String status = subscribers.findSubscriptionStatusByEmail(email.get()).orElse(null);
         response.put("subscriptionStatus", status);
-        response.put("subscriptionDate", resolveSubscriptionDate(email.get(), status));
+
+        SubscriptionDateInfo dateInfo = resolveSubscriptionDate(email.get(), status);
+        response.put("subscriptionDate", dateInfo.date());
+        response.put("cancelAtPeriodEnd", dateInfo.cancelAtPeriodEnd());
 
         return ResponseEntity.ok(response);
     }
+
+    /** date: see resolveSubscriptionDate()'s javadoc. cancelAtPeriodEnd: true once SubscriptionController.cancel() has scheduled a trialing/active subscription to stop, even though subscriptionStatus itself won't flip until Stripe's customer.subscription.deleted webhook fires later at period end. */
+    private record SubscriptionDateInfo(String date, boolean cancelAtPeriodEnd) {}
 
     /**
      * The one date relevant to whichever status the subscriber is
@@ -74,38 +80,49 @@ public class PreferencesController {
      * path. subscription_end_date for canceled needs no Stripe call --
      * it's already the local source of truth, set by deactivate().
      *
-     * Returns null (not an error) for any other status, or if the
-     * Stripe call fails -- a transient Stripe outage shouldn't break
-     * the rest of this page. States, the alerts toggle, and Save all
-     * still work with a null date; the frontend just omits the
+     * Also returns cancel_at_period_end straight off the same Stripe
+     * object for trialing/active -- free, since resolveSubscriptionDate
+     * already fetches the subscription for the date. Without this, a
+     * subscriber who just cancelled mid-trial sees the exact same
+     * "Free Trial Ends in N days" message as someone who hasn't
+     * cancelled at all, since subscriptionStatus stays 'trialing' until
+     * the webhook actually fires at the real trial end.
+     *
+     * Returns a null date (not an error) for any other status, or if
+     * the Stripe call fails -- a transient Stripe outage shouldn't
+     * break the rest of this page. States, the alerts toggle, and Save
+     * all still work with a null date; the frontend just omits the
      * status line rather than showing something wrong.
      */
-    private String resolveSubscriptionDate(String email, String status) {
+    private SubscriptionDateInfo resolveSubscriptionDate(String email, String status) {
         if (status == null) {
-            return null;
+            return new SubscriptionDateInfo(null, false);
         }
 
         if ("canceled".equals(status)) {
-            return subscribers.findSubscriptionEndDateByEmail(email)
+            String date = subscribers.findSubscriptionEndDateByEmail(email)
                     .map(PreferencesController::epochMillisToIsoDate)
                     .orElse(null);
+            return new SubscriptionDateInfo(date, true);
         }
 
         if (!"trialing".equals(status) && !"active".equals(status)) {
-            return null;
+            return new SubscriptionDateInfo(null, false);
         }
 
         Optional<String> stripeSubscriptionId = subscribers.findStripeSubscriptionIdByEmail(email);
         if (stripeSubscriptionId.isEmpty()) {
-            return null;
+            return new SubscriptionDateInfo(null, false);
         }
 
         try {
             Subscription subscription = Subscription.retrieve(stripeSubscriptionId.get());
+            boolean cancelAtPeriodEnd = Boolean.TRUE.equals(subscription.getCancelAtPeriodEnd());
 
             if ("trialing".equals(status)) {
                 Long trialEnd = subscription.getTrialEnd();
-                return trialEnd == null ? null : epochSecondsToIsoDate(trialEnd);
+                return new SubscriptionDateInfo(
+                        trialEnd == null ? null : epochSecondsToIsoDate(trialEnd), cancelAtPeriodEnd);
             }
 
             // "active" -- current_period_end moved off Subscription onto each
@@ -116,13 +133,15 @@ public class PreferencesController {
             // that matters here.
             List<SubscriptionItem> items = subscription.getItems().getData();
             if (items.isEmpty()) {
-                return null;
+                return new SubscriptionDateInfo(null, cancelAtPeriodEnd);
             }
             Long currentPeriodEnd = items.get(0).getCurrentPeriodEnd();
-            return currentPeriodEnd == null ? null : epochSecondsToIsoDate(currentPeriodEnd);
+            return new SubscriptionDateInfo(
+                    currentPeriodEnd == null ? null : epochSecondsToIsoDate(currentPeriodEnd), cancelAtPeriodEnd);
         } catch (StripeException e) {
+            // Log and degrade gracefully -- see javadoc above.
             log.log(Level.WARNING, "Could not fetch subscription date from Stripe for " + email, e);
-            return null;
+            return new SubscriptionDateInfo(null, false);
         }
     }
 
