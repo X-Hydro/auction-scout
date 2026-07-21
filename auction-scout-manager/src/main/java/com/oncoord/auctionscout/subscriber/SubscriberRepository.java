@@ -22,7 +22,6 @@ import java.util.Optional;
 public class SubscriberRepository {
 
     private static final int MAX_STATES_PER_SUBSCRIBER = 4;
-    private static final long TRIAL_LENGTH_MILLIS = 30L * 24 * 60 * 60 * 1000;
     private static final SecureRandom RANDOM = new SecureRandom();
 
     private final JdbcTemplate jdbc;
@@ -32,18 +31,18 @@ public class SubscriberRepository {
     }
 
     /**
-     * Appended to is_active = 1 anywhere access needs to be trial-or-
-     * paid-gated (session lookup, weekly send list): true if either the
-     * subscriber is within 30 days of subscription_start_date, or
-     * Stripe has told us (via webhook) that a subscription is active.
-     * A NULL subscription_start_date (shouldn't happen for is_active=1
-     * rows, since it's set alongside verification) is treated as
-     * expired rather than open-ended.
+     * Whether a subscriber currently has a live Stripe subscription --
+     * 'active' (billing) or 'trialing' (Stripe's own 30-day trial,
+     * started at Checkout via trial_period_days -- see
+     * SubscriptionController.checkout()). Gates the one thing that's
+     * actually paid: weekly email notifications (see
+     * findActiveWithAlertsEnabled() and hasActiveStripeSubscription()).
+     * Dashboard and preferences access do NOT depend on this -- any
+     * verified subscriber can use those for free; see
+     * findEmailBySessionToken() below.
      */
-    private static final String HAS_ACCESS_CLAUSE =
-            "(stripe_subscription_status = 'active' " +
-                    "OR (subscription_start_date IS NOT NULL " +
-                    "AND ? < subscription_start_date + " + TRIAL_LENGTH_MILLIS + "))";
+    private static final String SUBSCRIBED_CLAUSE =
+            "stripe_subscription_status IN ('active', 'trialing')";
 
     public boolean existsByEmail(String email) {
         Integer count = jdbc.queryForObject(
@@ -97,21 +96,51 @@ public class SubscriberRepository {
     }
 
     /**
-     * Empty if the token doesn't match an active row, OR if it matches
-     * one whose trial has lapsed with no active Stripe subscription --
-     * same "not logged in" response either way, so an expired-trial
-     * subscriber gets bounced back to a resubscribe prompt rather than
-     * a confusing partial session.
+     * Empty if the token doesn't match a verified, still-active row.
+     * Deliberately does NOT check SUBSCRIBED_CLAUSE -- the dashboard and
+     * preferences page are free for any verified subscriber; only the
+     * weekly emails require an actual (trialing-or-paid) subscription.
+     * Same query as findEmailByActiveSessionToken() below now -- kept as
+     * two methods since callers express different intent, but they're
+     * equivalent today.
      */
     public Optional<String> findEmailBySessionToken(String sessionToken) {
         if (sessionToken == null || sessionToken.isBlank()) {
             return Optional.empty();
         }
         return jdbc.query(
-                "SELECT email FROM subscribers WHERE session_token = ? AND is_active = 1 " +
-                        "AND " + HAS_ACCESS_CLAUSE,
+                "SELECT email FROM subscribers WHERE session_token = ? AND is_active = 1",
                 rs -> rs.next() ? Optional.of(rs.getString("email")) : Optional.empty(),
-                sessionToken, System.currentTimeMillis()
+                sessionToken
+        );
+    }
+
+    /**
+     * Deliberately looser than findEmailBySessionToken() -- no
+     * HAS_ACCESS_CLAUSE check, just "is this a real, still-registered
+     * (not explicitly cancelled) subscriber." Used only by billing
+     * endpoints (SubscriptionController.checkout(), cancel()) that must
+     * stay reachable even once a subscriber's trial has lapsed --
+     * otherwise a lapsed-trial subscriber gets locked out of the one
+     * endpoint whose entire purpose is letting them pay to regain
+     * access, since HAS_ACCESS_CLAUSE would reject them there too.
+     *
+     * Safe to be looser here: creating a Checkout Session doesn't grant
+     * access by itself -- access is only ever granted by the
+     * checkout.session.completed webhook actually completing, which is
+     * the real gate. An explicitly cancelled subscriber (is_active = 0)
+     * still can't reach this at all, since deactivate() clears
+     * session_token to NULL -- they have no token left to send until
+     * they register again.
+     */
+    public Optional<String> findEmailByActiveSessionToken(String sessionToken) {
+        if (sessionToken == null || sessionToken.isBlank()) {
+            return Optional.empty();
+        }
+        return jdbc.query(
+                "SELECT email FROM subscribers WHERE session_token = ? AND is_active = 1",
+                rs -> rs.next() ? Optional.of(rs.getString("email")) : Optional.empty(),
+                sessionToken
         );
     }
 
@@ -156,14 +185,16 @@ public class SubscriberRepository {
      * Who the weekly scheduler should mail. is_active excludes
      * unverified and cancelled subscribers (same flag, see
      * deactivate()'s javadoc); email_alerts_enabled excludes anyone
-     * who's paused emails without cancelling outright.
+     * who's paused emails without cancelling outright; SUBSCRIBED_CLAUSE
+     * excludes anyone who's never subscribed (or whose trial/subscription
+     * has actually ended in Stripe) -- the dashboard is free, but emails
+     * are the paid feature.
      */
     public List<ActiveSubscriber> findActiveWithAlertsEnabled() {
         return jdbc.query(
                 "SELECT id, email FROM subscribers WHERE is_active = 1 AND email_alerts_enabled = 1 " +
-                        "AND " + HAS_ACCESS_CLAUSE,
-                (rs, rowNum) -> new ActiveSubscriber(rs.getInt("id"), rs.getString("email")),
-                System.currentTimeMillis()
+                        "AND " + SUBSCRIBED_CLAUSE,
+                (rs, rowNum) -> new ActiveSubscriber(rs.getInt("id"), rs.getString("email"))
         );
     }
 
@@ -207,29 +238,62 @@ public class SubscriberRepository {
      * and the next successful /verify flips is_active back to 1 and
      * clears subscription_end_date via markVerifiedAndIssueSessionToken()
      * -- reactivation is just "verify again", not a separate code path.
+     *
+     * Also clears stripe_subscription_status here, not just is_active/
+     * session_token/subscription_end_date -- without this, a cancelled
+     * subscriber's row still shows stripe_subscription_status='active'
+     * forever, and HAS_ACCESS_CLAUSE checks that column FIRST, before
+     * the trial window. That combination meant a subscriber who
+     * genuinely cancelled could get permanent free access back just by
+     * re-verifying their email later -- no payment required. Reached
+     * from both the manual cancel() flow and the
+     * customer.subscription.deleted webhook, so both paths get this
+     * fix for free.
      */
     public void deactivate(String email) {
         jdbc.update(
-                "UPDATE subscribers SET is_active = 0, session_token = NULL, subscription_end_date = ? " +
-                        "WHERE email = ?",
+                "UPDATE subscribers SET is_active = 0, session_token = NULL, subscription_end_date = ?, " +
+                        "stripe_subscription_status = 'canceled' WHERE email = ?",
                 System.currentTimeMillis(), email
         );
     }
 
     /**
+     * Used by PreferencesController to decide whether the frontend
+     * should show "Subscribe" or "Cancel" (and now, whether to show the
+     * email alerts toggle at all) -- true for 'trialing' as well as
+     * 'active', so a subscriber mid-Stripe-trial sees the same UI as a
+     * fully paid one, not the pre-subscribe state.
+     */
+    public boolean hasActiveStripeSubscription(String email) {
+        String status = jdbc.query(
+                "SELECT stripe_subscription_status FROM subscribers WHERE email = ?",
+                rs -> rs.next() ? rs.getString("stripe_subscription_status") : null,
+                email
+        );
+        return "active".equals(status) || "trialing".equals(status);
+    }
+
+    /**
      * Called from the checkout.session.completed webhook handler once
-     * Stripe confirms payment. Stores both IDs so a later subscription-
+     * Stripe confirms checkout. Stores both IDs so a later subscription-
      * lifecycle webhook (which carries the subscription ID, not the
      * subscriber's email) can find its way back to this row via
-     * findEmailByStripeSubscriptionId(). Status is set to 'active' here
-     * rather than waiting for a follow-up customer.subscription.created
-     * event, since checkout.session.completed already implies that.
+     * findEmailByStripeSubscriptionId().
+     *
+     * Takes the real status rather than assuming 'active': with
+     * trial_period_days now set on Checkout (see
+     * SubscriptionController.checkout()), a subscriber completing
+     * checkout is 'trialing', not 'active' -- 'active' only becomes
+     * true after the trial ends and the first real charge succeeds. The
+     * caller should read the actual status off the Stripe Subscription
+     * object rather than hardcode it here.
      */
-    public void recordStripeSubscription(String email, String stripeCustomerId, String stripeSubscriptionId) {
+    public void recordStripeSubscription(String email, String stripeCustomerId, String stripeSubscriptionId, String status) {
         jdbc.update(
                 "UPDATE subscribers SET stripe_customer_id = ?, stripe_subscription_id = ?, " +
-                        "stripe_subscription_status = 'active' WHERE email = ?",
-                stripeCustomerId, stripeSubscriptionId, email
+                        "stripe_subscription_status = ? WHERE email = ?",
+                stripeCustomerId, stripeSubscriptionId, status, email
         );
     }
 
@@ -259,6 +323,22 @@ public class SubscriberRepository {
      * subscriber) or not (still-trialing subscriber cancelling early --
      * nothing on the Stripe side to touch).
      */
+    /**
+     * Used by SubscriptionController.cancellationInfo() for the
+     * "customer since" line on the cancellation confirmation page.
+     */
+    public Optional<Long> findSubscriptionStartDateByEmail(String email) {
+        return jdbc.query(
+                "SELECT subscription_start_date FROM subscribers WHERE email = ?",
+                rs -> {
+                    if (!rs.next()) return Optional.empty();
+                    long v = rs.getLong("subscription_start_date");
+                    return rs.wasNull() ? Optional.<Long>empty() : Optional.of(v);
+                },
+                email
+        );
+    }
+
     public Optional<String> findStripeSubscriptionIdByEmail(String email) {
         return jdbc.query(
                 "SELECT stripe_subscription_id FROM subscribers WHERE email = ?",

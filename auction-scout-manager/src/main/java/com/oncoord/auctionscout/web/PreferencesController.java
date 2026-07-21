@@ -44,7 +44,8 @@ public class PreferencesController {
         return ResponseEntity.ok(Map.of(
                 "email", email.get(),
                 "states", subscribers.getStates(email.get()),
-                "emailAlertsEnabled", subscribers.getEmailAlertsEnabled(email.get())
+                "emailAlertsEnabled", subscribers.getEmailAlertsEnabled(email.get()),
+                "hasActiveSubscription", subscribers.hasActiveStripeSubscription(email.get())
         ));
     }
 

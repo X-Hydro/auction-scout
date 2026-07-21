@@ -126,7 +126,7 @@ public class StripeWebhookController {
             return null;
         }
 
-        subscribers.recordStripeSubscription(email, session.getCustomer(), session.getSubscription());
+        subscribers.recordStripeSubscription(email, session.getCustomer(), session.getSubscription(), "active");
         log.info("Recorded Stripe subscription for {} (customer={}, subscription={})",
                 email, session.getCustomer(), session.getSubscription());
         return email;

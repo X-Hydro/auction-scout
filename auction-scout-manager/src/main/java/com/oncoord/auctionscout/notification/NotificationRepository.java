@@ -73,6 +73,19 @@ public class NotificationRepository {
         return count != null && count > 0;
     }
 
+    /**
+     * Used by SubscriptionController.cancellationInfo() for the "you've
+     * received N notifications" line on the cancellation confirmation
+     * page.
+     */
+    public int countSentByType(String email, String notificationType) {
+        Integer count = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM email_notifications WHERE email = ? AND notification_type = ?",
+                Integer.class, email, notificationType
+        );
+        return count != null ? count : 0;
+    }
+
     public void recordSent(String email, Integer subscriberId, String notificationType) {
         jdbc.update(
                 "INSERT INTO email_notifications (subscriber_id, email, notification_type, sent_at) " +

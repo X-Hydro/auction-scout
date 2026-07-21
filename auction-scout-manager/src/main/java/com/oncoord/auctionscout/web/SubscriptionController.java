@@ -1,17 +1,22 @@
 package com.oncoord.auctionscout.web;
 
+import com.oncoord.auctionscout.digest.DigestSendService;
+import com.oncoord.auctionscout.notification.NotificationRepository;
 import com.oncoord.auctionscout.subscriber.SubscriberRepository;
 import com.stripe.exception.StripeException;
+import com.stripe.model.Price;
 import com.stripe.model.checkout.Session;
 import com.stripe.param.checkout.SessionCreateParams;
-import com.stripe.param.SubscriptionCancelParams;
+import com.stripe.param.SubscriptionUpdateParams;
 import com.stripe.model.Subscription;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 
@@ -22,13 +27,15 @@ import java.util.Optional;
  * preference being saved. Checkout and the billing portal live here
  * too since they're all part of the same subscription lifecycle.
  *
- * Stripe is wired up as of this cancel() -- see
- * SubscriberRepository.deactivate() for what actually happens to the
- * row (soft-deactivate, not delete): the same method is now reached
- * both from here (manual cancel) and from StripeWebhookController on a
- * customer.subscription.deleted event, so a subscriber cancelled
- * either from our UI or directly from Stripe's own portal ends up in
- * the same place.
+ * cancel() uses Stripe's cancel-at-period-end rather than immediate
+ * cancellation for a paid subscriber -- they keep access through what
+ * they already paid for. Access only actually gets revoked later, when
+ * Stripe's own customer.subscription.deleted webhook fires at the real
+ * period end (StripeWebhookController already handles that event
+ * correctly; this class doesn't need to know when that happens). A
+ * still-trialing subscriber with no Stripe subscription at all is the
+ * one case that still deactivates immediately here -- there's no paid
+ * period to honor for them.
  *
  * billingPortal() is deliberately kept separate from cancel() rather
  * than letting the portal handle cancellation too (Stripe's default
@@ -43,25 +50,29 @@ import java.util.Optional;
 public class SubscriptionController {
 
     private final SubscriberRepository subscribers;
+    private final NotificationRepository notifications;
     private final String stripePriceId;
     private final String appBaseUrl;
 
     public SubscriptionController(SubscriberRepository subscribers,
+                                  NotificationRepository notifications,
                                   @Value("${auctionscout.stripe.price-id}") String stripePriceId,
                                   @Value("${auctionscout.app.base-url}") String appBaseUrl) {
         this.subscribers = subscribers;
+        this.notifications = notifications;
         this.stripePriceId = stripePriceId;
         this.appBaseUrl = appBaseUrl;
     }
 
     /**
      * Creates a Stripe Checkout Session for the caller and returns its
-     * hosted URL for the frontend to redirect to. No trial is set on
-     * the Stripe side -- our own subscription_start_date-based trial
-     * (see SubscriberRepository.HAS_ACCESS_CLAUSE) is what's been
-     * granting access up to this point, so billing here starts
-     * immediately on checkout completion rather than layering a second,
-     * Stripe-native trial on top.
+     * hosted URL for the frontend to redirect to. trial_period_days=30
+     * gives Stripe its own 30-day trial: a card is collected now, but
+     * nothing is charged until the trial ends, and the subscriber can
+     * cancel any time before then with nothing paid. This is the one
+     * thing access is actually gated on -- the dashboard itself is free
+     * for any verified subscriber (see SubscriberRepository
+     * .findEmailBySessionToken()); only weekly emails require this.
      *
      * client_reference_id carries the subscriber's email so
      * StripeWebhookController can attribute the resulting
@@ -70,7 +81,11 @@ public class SubscriptionController {
      */
     @PostMapping("/subscription/checkout")
     public ResponseEntity<?> checkout(@RequestHeader("X-Session-Token") String sessionToken) throws StripeException {
-        Optional<String> email = subscribers.findEmailBySessionToken(sessionToken);
+        // findEmailByActiveSessionToken(), not findEmailBySessionToken():
+        // this must stay reachable even after a subscriber's trial has
+        // lapsed -- that's the whole point of this endpoint. See its
+        // javadoc in SubscriberRepository.
+        Optional<String> email = subscribers.findEmailByActiveSessionToken(sessionToken);
         if (email.isEmpty()) {
             return ResponseEntity.status(401).body(Map.of("error", "Invalid or expired session"));
         }
@@ -83,34 +98,115 @@ public class SubscriptionController {
                         .setPrice(stripePriceId)
                         .setQuantity(1L)
                         .build())
-                .setSuccessUrl(appBaseUrl + "/post-login.html?checkout=success")
-                .setCancelUrl(appBaseUrl + "/post-login.html?checkout=cancelled")
+                .setSubscriptionData(SessionCreateParams.SubscriptionData.builder()
+                        .setTrialPeriodDays(30L)
+                        .build())
+                .setSuccessUrl(appBaseUrl + "/auction-scout/preferences.html?checkout=success")
+                .setCancelUrl(appBaseUrl + "/auction-scout/preferences.html?checkout=cancelled")
                 .build();
 
         Session session = Session.create(params);
         return ResponseEntity.ok(Map.of("url", session.getUrl()));
     }
 
+    private volatile Map<String, Object> cachedPriceInfo;
+    private volatile long priceCacheExpiresAt;
+
+    /**
+     * Public, unauthenticated -- price isn't subscriber-specific. Cached
+     * for an hour since it changes essentially never and Stripe rate-
+     * limits; avoids a live Stripe call on every preferences.html load.
+     */
+    @GetMapping("/subscription/price-info")
+    public ResponseEntity<?> priceInfo() throws StripeException {
+        long now = System.currentTimeMillis();
+        if (cachedPriceInfo == null || now > priceCacheExpiresAt) {
+            Price price = Price.retrieve(stripePriceId);
+            cachedPriceInfo = Map.of(
+                    "amount", price.getUnitAmount(),
+                    "currency", price.getCurrency(),
+                    "interval", price.getRecurring().getInterval()
+            );
+            priceCacheExpiresAt = now + 3_600_000; // 1 hour
+        }
+        return ResponseEntity.ok(cachedPriceInfo);
+    }
+
+    /**
+     * Read-only preview for the cancellation confirmation page --
+     * doesn't cancel anything, just gathers what that page needs to
+     * show before the subscriber actually confirms. activeUntil means
+     * two different things depending on whether there's a real Stripe
+     * subscription: for a paid subscriber it's the real, live
+     * current_period_end fetched from Stripe (fetched fresh here, not
+     * cached locally, since it changes every billing cycle); for a
+     * still-trialing subscriber with nothing to cancel on Stripe's
+     * side, cancelling is immediate, so it's just "now."
+     */
+    @GetMapping("/subscription/cancellation-info")
+    public ResponseEntity<?> cancellationInfo(@RequestHeader("X-Session-Token") String sessionToken)
+            throws StripeException {
+        Optional<String> email = subscribers.findEmailByActiveSessionToken(sessionToken);
+        if (email.isEmpty()) {
+            return ResponseEntity.status(401).body(Map.of("error", "Invalid or expired session"));
+        }
+
+        Map<String, Object> info = new HashMap<>();
+        info.put("customerSince", subscribers.findSubscriptionStartDateByEmail(email.get()).orElse(null));
+        info.put("notificationsSent", notifications.countSentByType(email.get(), DigestSendService.TYPE_WEEKLY));
+
+        Optional<String> stripeSubscriptionId = subscribers.findStripeSubscriptionIdByEmail(email.get());
+        if (stripeSubscriptionId.isPresent() && subscribers.hasActiveStripeSubscription(email.get())) {
+            Subscription subscription = Subscription.retrieve(stripeSubscriptionId.get());
+            // As of stripe-java 33.x, current_period_end lives on each
+            // subscription item, not on the Subscription itself (same
+            // restructuring as Invoice.getSubscription() -- see
+            // StripeWebhookController). A single-price subscription
+            // like this app's always has exactly one item.
+            long currentPeriodEndSeconds = subscription.getItems().getData().get(0).getCurrentPeriodEnd();
+            info.put("activeUntil", currentPeriodEndSeconds * 1000);
+            info.put("immediateCancellation", false);
+        } else {
+            info.put("activeUntil", System.currentTimeMillis());
+            info.put("immediateCancellation", true);
+        }
+
+        return ResponseEntity.ok(info);
+    }
+
     @PostMapping("/subscription/cancel")
     public ResponseEntity<?> cancel(@RequestHeader("X-Session-Token") String sessionToken) throws StripeException {
-        Optional<String> email = subscribers.findEmailBySessionToken(sessionToken);
+        Optional<String> email = subscribers.findEmailByActiveSessionToken(sessionToken);
         if (email.isEmpty()) {
             return ResponseEntity.status(401).body(Map.of("error", "Invalid or expired session"));
         }
 
         // Still-trialing subscribers who never checked out have no
-        // Stripe subscription to cancel -- only call out to Stripe when
-        // one is actually on file.
+        // Stripe subscription to cancel -- and nothing paid to honor,
+        // so they deactivate immediately below. A paid subscriber
+        // schedules cancellation for period end instead and keeps
+        // access until then -- deactivate() is NOT called here for
+        // that case; StripeWebhookController's customer.subscription.
+        // deleted handler does it later, when Stripe actually ends the
+        // subscription.
         Optional<String> stripeSubscriptionId = subscribers.findStripeSubscriptionIdByEmail(email.get());
-        if (stripeSubscriptionId.isPresent()) {
+        if (stripeSubscriptionId.isPresent() && subscribers.hasActiveStripeSubscription(email.get())) {
             Subscription.retrieve(stripeSubscriptionId.get())
-                    .cancel(SubscriptionCancelParams.builder().build());
+                    .update(SubscriptionUpdateParams.builder()
+                            .setCancelAtPeriodEnd(true)
+                            .build());
+
+            return ResponseEntity.ok(Map.of(
+                    "message", "Your subscription is set to cancel at the end of your current billing period.",
+                    "immediateCancellation", false
+            ));
         }
 
         subscribers.deactivate(email.get());
 
         return ResponseEntity.ok(Map.of(
-                "message", "Your subscription has been cancelled."
+                "message", "Your subscription has been cancelled.",
+                "immediateCancellation", true
         ));
     }
 
@@ -127,7 +223,7 @@ public class SubscriptionController {
     @PostMapping("/subscription/billing-portal")
     public ResponseEntity<?> billingPortal(@RequestHeader("X-Session-Token") String sessionToken)
             throws StripeException {
-        Optional<String> email = subscribers.findEmailBySessionToken(sessionToken);
+        Optional<String> email = subscribers.findEmailByActiveSessionToken(sessionToken);
         if (email.isEmpty()) {
             return ResponseEntity.status(401).body(Map.of("error", "Invalid or expired session"));
         }
@@ -142,7 +238,7 @@ public class SubscriptionController {
         com.stripe.param.billingportal.SessionCreateParams params =
                 com.stripe.param.billingportal.SessionCreateParams.builder()
                         .setCustomer(stripeCustomerId.get())
-                        .setReturnUrl(appBaseUrl + "/preferences.html")
+                        .setReturnUrl(appBaseUrl + "/auction-scout/preferences.html")
                         .build();
 
         com.stripe.model.billingportal.Session portalSession =

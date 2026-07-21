@@ -96,7 +96,7 @@ public class DigestService {
         String html = render(email, states, changesSince, truncate);
 
         if (!truncate) {
-            String plainUrl = appBaseUrl + "/auction-scout/watch.html";
+            String plainUrl = appBaseUrl + "/auction-scout/status.html";
             return html.replace(UPCOMING_LINK_PLACEHOLDER, plainUrl)
                     .replace(CHANGES_LINK_PLACEHOLDER, plainUrl);
         }
@@ -107,7 +107,7 @@ public class DigestService {
 
     /**
      * Issues a magic-link token pointing at post-login.html, redirecting
-     * to watch.html. Expiry is enforced by VerifyController on consume,
+     * to status.html. Expiry is enforced by VerifyController on consume,
      * same as every other magic link.
      */
     private String buildAutoLoginLink(String email) {
@@ -115,7 +115,7 @@ public class DigestService {
         return appBaseUrl + "/auction-scout/post-login.html#email="
                 + URLEncoder.encode(email, StandardCharsets.UTF_8)
                 + "&token=" + URLEncoder.encode(rawToken, StandardCharsets.UTF_8)
-                + "&redirect=" + URLEncoder.encode("/auction-scout/watch.html", StandardCharsets.UTF_8);
+                + "&redirect=" + URLEncoder.encode("/auction-scout/status.html", StandardCharsets.UTF_8);
     }
 
     /**
