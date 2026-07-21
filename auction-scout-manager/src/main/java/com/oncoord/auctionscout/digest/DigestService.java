@@ -59,12 +59,14 @@ public class DigestService {
     private static final List<String> TERMINAL_STATUS_KEYWORDS =
             List.of("cancel", "sold", "third party", "3rd party");
 
-    // Placeholders render() emits for the "View all ..." links since it
-    // has no subscriber email to build a real link with -- only
-    // renderForSubscriber() fills these in. Two distinct placeholders
-    // because each needs its own single-use magic-link token.
-    private static final String UPCOMING_LINK_PLACEHOLDER = "{{STATUS_LINK_UPCOMING}}";
-    private static final String CHANGES_LINK_PLACEHOLDER = "{{STATUS_LINK_CHANGES}}";
+    // status.html and the map are unauthenticated now (see statusUrl())
+    // -- states are public, so that link can be built directly wherever
+    // render() has a states list, no placeholder/replace pass needed.
+    // preferences.html is the one page still gated on session_token
+    // (controls email opt-in, state selection, and Stripe billing), so
+    // its footer link is the only one still built through a placeholder,
+    // since only renderForSubscriber() has an email to mint a token for.
+    private static final String PREFERENCES_LINK_PLACEHOLDER = "{{PREFERENCES_LINK}}";
 
     private final PropertyDigestRepository repository;
     private final SubscriberRepository subscribers;
@@ -86,36 +88,37 @@ public class DigestService {
 
     /**
      * Looks up the subscriber's states, renders their digest, then fills
-     * in the "View all ..." link placeholders render() left behind.
-     * truncate=true issues fresh auto-login tokens (same magic-link
-     * mechanism as registration); truncate=false points at the plain
-     * watch page URL, since nothing is ever truncated there.
+     * in the preferences-link placeholder render() left behind.
+     * truncate=true (the actual emailed digest) issues a fresh
+     * auto-login token, since the recipient isn't already logged in
+     * anywhere; truncate=false (the /status HTML view, viewer already
+     * holds a session_token) points at the plain preferences.html URL
+     * instead, so viewing the status page doesn't mint a wasted
+     * single-use token on every load.
      */
     public String renderForSubscriber(String email, OffsetDateTime changesSince, boolean truncate) {
         List<String> states = subscribers.getStates(email);
         String html = render(email, states, changesSince, truncate);
 
-        if (!truncate) {
-            String plainUrl = appBaseUrl + "/auction-scout/status.html";
-            return html.replace(UPCOMING_LINK_PLACEHOLDER, plainUrl)
-                    .replace(CHANGES_LINK_PLACEHOLDER, plainUrl);
-        }
-
-        return html.replace(UPCOMING_LINK_PLACEHOLDER, buildAutoLoginLink(email))
-                .replace(CHANGES_LINK_PLACEHOLDER, buildAutoLoginLink(email));
+        String preferencesLink = truncate
+                ? buildPreferencesLink(email)
+                : appBaseUrl + "/auction-scout/preferences.html";
+        return html.replace(PREFERENCES_LINK_PLACEHOLDER, preferencesLink);
     }
 
     /**
      * Issues a magic-link token pointing at post-login.html, redirecting
-     * to status.html. Expiry is enforced by VerifyController on consume,
-     * same as every other magic link.
+     * to preferences.html. Expiry is enforced by VerifyController on
+     * consume, same as every other magic link. This is now the only
+     * remaining consumer of the magic-link flow in DigestService --
+     * status.html and the map dropped auth entirely (see statusUrl()).
      */
-    private String buildAutoLoginLink(String email) {
+    private String buildPreferencesLink(String email) {
         String rawToken = tokenService.issue(email);
         return appBaseUrl + "/auction-scout/post-login.html#email="
                 + URLEncoder.encode(email, StandardCharsets.UTF_8)
                 + "&token=" + URLEncoder.encode(rawToken, StandardCharsets.UTF_8)
-                + "&redirect=" + URLEncoder.encode("/auction-scout/status.html", StandardCharsets.UTF_8);
+                + "&redirect=" + URLEncoder.encode("/auction-scout/preferences.html", StandardCharsets.UTF_8);
     }
 
     /**
@@ -170,13 +173,29 @@ public class DigestService {
                 <div class='section'><h2>Status Changes</h2>
                 %s
                 </div>
-                <div class='footer'>You're receiving this because you subscribed to AuctionScout Auction Watch. <a href='#'>Manage preferences</a> · <a href='#'>Unsubscribe</a></div>
+                <div class='footer'>You're receiving this because you subscribed to AuctionScout Auction Watch. <a href='%s'>Manage preferences</a> &middot; <a href='%s'>Unsubscribe</a></div>
                 </div></body></html>
                 """.formatted(
                 now.format(DateTimeFormatter.ofPattern("MMMM d, yyyy", Locale.US)),
-                renderUpcoming(upcoming, truncate, UPCOMING_LINK_PLACEHOLDER),
-                renderChanges(buildChangeGroups(changes, email), truncate, CHANGES_LINK_PLACEHOLDER)
+                renderUpcoming(upcoming, truncate, statusUrl(states)),
+                renderChanges(buildChangeGroups(changes, email), truncate, statusUrl(states)),
+                PREFERENCES_LINK_PLACEHOLDER,
+                PREFERENCES_LINK_PLACEHOLDER
         );
+    }
+
+    /**
+     * status.html and the map are unauthenticated (see the class-level
+     * note above) -- states aren't sensitive, so this is just a plain,
+     * bookmarkable filtered-view URL, no token involved. Built here
+     * rather than at the renderForSubscriber() call site so the public,
+     * no-subscriber render(states, ...) overload gets a working link
+     * too, not just the per-subscriber path.
+     */
+    private String statusUrl(List<String> states) {
+        String stateParam = String.join(",", states);
+        return appBaseUrl + "/auction-scout/status.html?states="
+                + URLEncoder.encode(stateParam, StandardCharsets.UTF_8);
     }
 
     private String renderUpcoming(List<UpcomingListing> upcoming, boolean truncate, String viewAllLinkHref) {
@@ -558,17 +577,36 @@ public class DigestService {
     public record DigestData(List<UpcomingRow> upcoming, List<ChangeRow> changes) {}
 
     /**
-     * Structured equivalent of renderForSubscriber(email, changesSince,
-     * false) -- same repository calls, same buildChangeGroups rules,
-     * just returned as rows instead of pre-rendered HTML. The status
-     * page uses this single payload to build both its on-screen DOM and
-     * its CSV exports, so the two can never disagree with each other:
-     * there's nothing left to independently re-derive on either side.
-     * No truncate param -- that concept only applies to the emailed
-     * digest, never to this page.
+     * Kept for any other subscriber-scoped, per-email caller (e.g. the
+     * scheduled email job, if it ever wants structured data instead of
+     * HTML) -- looks up the subscriber's states, then defers to
+     * renderAsData(). status.html/StatusController no longer go through
+     * this: they call renderAsData() directly with states off the
+     * request, no subscriber lookup involved.
      */
     public DigestData renderForSubscriberAsData(String email, OffsetDateTime changesSince) {
         List<String> states = subscribers.getStates(email);
+        return renderAsData(states, email, changesSince);
+    }
+
+    /**
+     * Structured equivalent of render(states, changesSince, false) --
+     * the public/anonymous entry point, now that status.html reads a
+     * plain ?states= list instead of resolving a subscriber via
+     * session_token. Same repository calls and buildChangeGroups rules
+     * as the subscriber-scoped path; the status page uses this single
+     * payload to build both its on-screen DOM and its CSV exports, so
+     * the two can never disagree with each other. No truncate param --
+     * that concept only applies to the emailed digest, never to this
+     * page. No email -- see buildChangeGroups' javadoc: the Removed
+     * bucket is never shown here, since there's no subscriber to check
+     * "was this address ever emailed to them before it disappeared."
+     */
+    public DigestData renderAsData(List<String> states, OffsetDateTime changesSince) {
+        return renderAsData(states, null, changesSince);
+    }
+
+    private DigestData renderAsData(List<String> states, String email, OffsetDateTime changesSince) {
         LocalDateTime now = LocalDateTime.now();
 
         List<UpcomingListing> upcoming = repository.findUpcoming(states, now, now.plusDays(7));
