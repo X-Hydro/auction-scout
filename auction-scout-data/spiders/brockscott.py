@@ -37,8 +37,10 @@ this spider; that's not a parsing bug to chase.
 
 import re
 import time
+import random
 from datetime import datetime
 from urllib.parse import quote
+from requests.exceptions import HTTPError
 
 from dateutil import parser as date_parser
 
@@ -87,7 +89,9 @@ class BrockScottSpider(AuctionSpider):
     name = "brockscott"
     base_url = "https://www.brockandscott.com"
     scrape_details = False  # everything is on the listing page, no detail hop
-    request_delay = 1.0
+    request_delay = 2.0          # up from 1.0 -- 90 pages back-to-back is a lot at 1s
+    max_retries = 4
+    backoff_base = 5             # seconds
     # A real browser UA -- bare requests without one got a 403 in testing.
     user_agent = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
@@ -120,7 +124,10 @@ class BrockScottSpider(AuctionSpider):
                 break
 
             print(f"[{self.name}] Fetching page {page_num}: {url}")
-            soup = self.get_soup(url)
+            soup = self._get_soup_with_retry(url)
+            if soup is None:
+                print(f"[{self.name}] Giving up on {url} after {self.max_retries} retries")
+                break
 
             for row in self.parse_listing(soup, url):
                 if row["id"] in seen_ids:
@@ -131,13 +138,28 @@ class BrockScottSpider(AuctionSpider):
 
             url = self._find_next_url(soup)
             page_num += 1
-            time.sleep(self.request_delay)
+            time.sleep(self.request_delay + random.uniform(0, 1.5))
 
         print(f"[{self.name}] {len(rows)} listings in {TARGET_STATES} "
               f"across {page_num - 1} page(s)")
         return rows
 
     # ---- helpers -----------------------------------------------------
+    def _get_soup_with_retry(self, url):
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                return self.get_soup(url)
+            except HTTPError as e:
+                resp = e.response
+                if resp is not None and resp.status_code == 429:
+                    retry_after = resp.headers.get("Retry-After")
+                    wait = float(retry_after) if retry_after else self.backoff_base * (2 ** (attempt - 1))
+                    print(f"[{self.name}] 429 on attempt {attempt}/{self.max_retries} "
+                          f"-- waiting {wait:.0f}s")
+                    time.sleep(wait)
+                    continue
+                raise
+        return None
 
     def _find_next_url(self, soup):
         for a in soup.select(".pagination a"):

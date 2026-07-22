@@ -6,6 +6,13 @@ Usage:
 
 Idempotent: re-running against an updated CSV will detect status/date changes
 on existing properties and log them to auction_events, rather than duplicating rows.
+
+Within a single CSV, rows are deduped by (source, listing_id) before diffing --
+a source can carry multiple live posts for the same case (e.g. Brock & Scott
+never retires old postponement notices), and diffing each one sequentially
+against the last would otherwise fabricate a chain of status/date "changes"
+for one property. The row with the latest parsed auction_dt wins; see the
+comment above the dedup block for the full tiebreak rules.
 """
 
 import csv
@@ -363,7 +370,42 @@ def load(csv_path: str, db_path: str):
             print(f"Columns found: {reader.fieldnames}")
             sys.exit(1)
 
-        for line_num, row in enumerate(reader, start=2):  # header is line 1
+        all_rows = list(enumerate(reader, start=2))  # header is line 1
+
+        # --- Dedupe by (source, listing_id): a single site can carry multiple
+        # live posts for the same underlying case (e.g. Brock & Scott never
+        # retires old postponement notices, so a case that's been pushed back
+        # several times shows up as several separate WP posts, all resolving
+        # to the same listing_id here since it's derived from the case
+        # number). Left unhandled, those would get diffed against each other
+        # sequentially within this one run and produce a spurious chain of
+        # status/date "changes" for a single property.
+        #
+        # Keep only the row with the latest parsed auction_dt per listing_id
+        # -- the most recently-postponed-to date is the best available proxy
+        # for "current", since none of these sources expose a real
+        # post/notice date to sort by instead. A row with no parseable date
+        # loses to any row that has one; if neither has a date, the later
+        # row in the file wins. Dropped duplicates aren't logged -- they're
+        # not real-world events, just repeat postings of the same notice.
+        deduped = {}
+        for line_num, row in all_rows:
+            listing_id = extract_listing_id(row["URL"], row["Name"])
+            key = (row["Source"], listing_id)
+            dt = parse_auction_datetime(row["Auction Date/Time"])
+            existing = deduped.get(key)
+            if existing is None:
+                deduped[key] = (line_num, row, dt)
+                continue
+            _, _, existing_dt = existing
+            if dt is not None and (existing_dt is None or dt > existing_dt):
+                deduped[key] = (line_num, row, dt)
+            elif dt is None and existing_dt is None:
+                deduped[key] = (line_num, row, dt)  # last-in-file wins, no date on either
+
+        rows_to_process = sorted(deduped.values(), key=lambda t: t[0])  # restore file order
+
+        for line_num, row, _ in rows_to_process:
             records_found += 1
             try:
                 source_name = row["Source"]
