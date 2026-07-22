@@ -552,6 +552,7 @@ public class DigestService {
 
     /** One row of the "Auctions in the Next 7 Days" section, as data rather than pre-rendered HTML. */
     public record UpcomingRow(
+            long propertyId,
             String state,
             String auctionDateTime, // ISO-8601 local date-time -- client-side sort key
             String dayLabel,        // e.g. "Monday, July 20"
@@ -563,6 +564,7 @@ public class DigestService {
 
     /** One row of the "Status Changes" section, as data rather than pre-rendered HTML. */
     public record ChangeRow(
+            long propertyId,
             String state,
             String category,        // "New" | "Date Changes" | "Status Changes" | "Removed"
             String address,
@@ -613,6 +615,7 @@ public class DigestService {
         List<UpcomingRow> upcomingRows = upcoming.stream()
                 .filter(l -> l.auctionDateTime() != null)
                 .map(l -> new UpcomingRow(
+                        l.propertyId(),
                         l.state(),
                         l.auctionDateTime().toString(),
                         l.auctionDateTime().format(DAY_HEADER),
@@ -626,6 +629,7 @@ public class DigestService {
         List<ChangedListing> changes = repository.findRecentChanges(states, changesSince);
         List<ChangeRow> changeRows = buildChangeGroups(changes, email).stream()
                 .map(g -> new ChangeRow(
+                        g.listing().propertyId(),
                         g.listing().state(),
                         g.category(),
                         g.listing().address(),

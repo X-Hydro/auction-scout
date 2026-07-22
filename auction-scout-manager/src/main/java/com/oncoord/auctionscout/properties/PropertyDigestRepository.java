@@ -35,11 +35,11 @@ import java.util.List;
 public class PropertyDigestRepository {
 
     public record UpcomingListing(
-            String address, String state, Double latitude, Double longitude,
+            long propertyId, String address, String state, Double latitude, Double longitude,
             String sourceUrl, LocalDateTime auctionDateTime) {}
 
     public record ChangedListing(
-            String address, String state, String eventType,
+            long propertyId, String address, String state, String eventType,
             String oldValue, String newValue, LocalDateTime auctionDateTime,
             OffsetDateTime firstSeenAt, OffsetDateTime lastSeenAt,
             OffsetDateTime detectedAt,
@@ -73,7 +73,7 @@ public class PropertyDigestRepository {
         String placeholders = String.join(",", states.stream().map(s -> "?").toList());
 
         String sql = """
-                SELECT p.address_raw, p.state, p.latitude, p.longitude,
+                SELECT p.property_id, p.address_raw, p.state, p.latitude, p.longitude,
                        a.source_url, a.auction_datetime
                 FROM auctions a
                 JOIN properties p ON p.property_id = a.property_id
@@ -97,6 +97,7 @@ public class PropertyDigestRepository {
 
         JdbcTemplate jdbc = dbManager.getJdbcTemplate();
         return jdbc.query(sql, (rs, rowNum) -> new UpcomingListing(
+                rs.getLong("property_id"),
                 rs.getString("address_raw"),
                 rs.getString("state"),
                 (Double) rs.getObject("latitude"),
@@ -139,7 +140,7 @@ public class PropertyDigestRepository {
         String placeholders = String.join(",", states.stream().map(s -> "?").toList());
 
         String sql = """
-                SELECT p.address_raw, p.state, p.first_seen_at, p.last_seen_at, a.auction_datetime,
+                SELECT p.property_id, p.address_raw, p.state, p.first_seen_at, p.last_seen_at, a.auction_datetime,
                        e.event_type, e.old_value, e.new_value, e.detected_at,
                        a.source_url, p.latitude, p.longitude
                 FROM auction_events e
@@ -161,6 +162,7 @@ public class PropertyDigestRepository {
 
         JdbcTemplate jdbc = dbManager.getJdbcTemplate();
         return jdbc.query(sql, (rs, rowNum) -> new ChangedListing(
+                rs.getLong("property_id"),
                 rs.getString("address_raw"),
                 rs.getString("state"),
                 rs.getString("event_type"),
