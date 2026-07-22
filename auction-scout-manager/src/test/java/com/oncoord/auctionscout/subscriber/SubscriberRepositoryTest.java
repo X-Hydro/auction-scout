@@ -276,6 +276,11 @@ class SubscriberRepositoryTest {
     @Test
     void setStates_doesNotOverwriteSubscriptionStartDate_onSubsequentCalls() {
         createActiveSubscriber("repeat@example.com", null);
+        // Subscribed, not free -- this test saves 2 states on the second
+        // call, which only a subscribed subscriber is allowed to do (see
+        // the state-limit tests below). Subscription status is
+        // incidental to what this test actually checks.
+        repo.recordStripeSubscription("repeat@example.com", "cus_repeat", "sub_repeat", "active");
         repo.setStates("repeat@example.com", List.of("VT"));
 
         // Force a known, obviously-not-"now" value so a second call
@@ -301,5 +306,68 @@ class SubscriberRepositoryTest {
         assertFalse(repo.findEmailBySessionToken("irrelevant").isPresent());
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
                 () -> repo.setStates("unverified@example.com", List.of("VT")));
+    }
+
+    // ---- setStates(): free vs. subscribed state limit ----
+
+    @Test
+    void setStates_allowsOneState_forFreeSubscriber() {
+        createActiveSubscriber("free@example.com", System.currentTimeMillis());
+
+        repo.setStates("free@example.com", List.of("VT"));
+
+        assertEquals(List.of("VT"), repo.getStates("free@example.com"));
+    }
+
+    @Test
+    void setStates_throws_whenFreeSubscriberRequestsMoreThanOneState() {
+        createActiveSubscriber("free@example.com", System.currentTimeMillis());
+
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> repo.setStates("free@example.com", List.of("VT", "NH")));
+    }
+
+    @Test
+    void setStates_throws_whenPastDueOrCanceledSubscriberRequestsMoreThanOneState() {
+        // Someone whose Stripe subscription lapsed should be treated the
+        // same as never having subscribed -- see
+        // hasActiveStripeSubscription_false_whenPastDueOrCanceled above.
+        createActiveSubscriber("lapsed@example.com", System.currentTimeMillis());
+        repo.recordStripeSubscription("lapsed@example.com", "cus_lapsed", "sub_lapsed", "active");
+        repo.updateStripeSubscriptionStatus("sub_lapsed", "canceled");
+
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> repo.setStates("lapsed@example.com", List.of("VT", "NH")));
+    }
+
+    @Test
+    void setStates_allowsUpToFourStates_forActiveSubscriber() {
+        createActiveSubscriber("paid@example.com", System.currentTimeMillis());
+        repo.recordStripeSubscription("paid@example.com", "cus_paid", "sub_paid", "active");
+
+        repo.setStates("paid@example.com", List.of("VT", "NH", "ME", "MA"));
+
+        assertEquals(List.of("MA", "ME", "NH", "VT"), repo.getStates("paid@example.com"));
+    }
+
+    @Test
+    void setStates_allowsUpToFourStates_forTrialingSubscriber() {
+        // Trialing gets identical access to active -- see
+        // hasActiveStripeSubscription_true_whenTrialing above.
+        createActiveSubscriber("trialing@example.com", System.currentTimeMillis());
+        repo.recordStripeSubscription("trialing@example.com", "cus_trial", "sub_trial", "trialing");
+
+        repo.setStates("trialing@example.com", List.of("VT", "NH", "ME", "MA"));
+
+        assertEquals(List.of("MA", "ME", "NH", "VT"), repo.getStates("trialing@example.com"));
+    }
+
+    @Test
+    void setStates_throws_whenSubscribedSubscriberExceedsFourStates() {
+        createActiveSubscriber("paid@example.com", System.currentTimeMillis());
+        repo.recordStripeSubscription("paid@example.com", "cus_paid2", "sub_paid2", "active");
+
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> repo.setStates("paid@example.com", List.of("VT", "NH", "ME", "MA", "CT")));
     }
 }

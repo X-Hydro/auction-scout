@@ -22,6 +22,8 @@ import java.util.Optional;
 public class SubscriberRepository {
 
     private static final int MAX_STATES_PER_SUBSCRIBER = 4;
+    private static final int MAX_STATES_FREE = 1;
+
     private static final SecureRandom RANDOM = new SecureRandom();
 
     private final JdbcTemplate jdbc;
@@ -389,9 +391,14 @@ public class SubscriberRepository {
      *         or if the subscriber doesn't exist / isn't verified
      */
     public void setStates(String email, List<String> states) {
-        if (states.size() > MAX_STATES_PER_SUBSCRIBER) {
-            throw new IllegalArgumentException(
-                    "A subscriber may select at most " + MAX_STATES_PER_SUBSCRIBER + " states");
+        boolean subscribed = hasActiveStripeSubscription(email);
+        int maxAllowed = subscribed ? MAX_STATES_PER_SUBSCRIBER : MAX_STATES_FREE;
+
+        if (states.size() > maxAllowed) {
+            throw new IllegalArgumentException(subscribed
+                    ? "A subscriber may select at most " + MAX_STATES_PER_SUBSCRIBER + " states"
+                    : "Free accounts are limited to 1 state — subscribe to select up to "
+                    + MAX_STATES_PER_SUBSCRIBER + ".");
         }
 
         Integer subscriberId = jdbc.query(
@@ -402,7 +409,6 @@ public class SubscriberRepository {
         if (subscriberId == null) {
             throw new IllegalArgumentException("No verified subscriber for email: " + email);
         }
-
         // COALESCE, not a plain SET: this only needs to fire once, the
         // first time a subscriber ever saves states. Without it, every
         // subsequent preferences edit would push subscription_start_date
