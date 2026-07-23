@@ -973,4 +973,76 @@ class DigestServiceTest {
         assertTrue(html.contains("No status changes to report this week."));
     }
 
+    // ---- Upcoming Auctions: the 8-29 day gap ----------------------------
+    //
+    // The old "Auctions in the Next 7 Days" section was a flat 7-day
+    // window with NO seasoning check at all -- nothing past 7 days out
+    // ever showed there, seasoned or not. The seasoning tests above cover
+    // "far out" (well past 30 days) and "near term" (well inside 7 days),
+    // but neither exercises the actual gap the redesign closed: a
+    // SEASONED listing between 8 and 29 days out, which used to be
+    // invisible everywhere on the page despite being fully confirmed.
+    // These use relative dates (LocalDateTime.now().plusDays(N)), same
+    // pattern as render_showsUpcomingAuction_inNext7DayWindow above --
+    // NOT a fixed calendar literal, so they can't go stale the way the
+    // seasoning tests above eventually will as real time passes their
+    // hardcoded 2026 dates.
+
+    @Test
+    void render_showsUpcomingAuction_inGapWindow_whenSeasoned() {
+        String auctionDateTime = LocalDateTime.now().withNano(0).plusDays(15).toString();
+
+        long propertyId = testData.property()
+                .address("77 Windward Lane, Portsmouth, NH")
+                .state("NH")
+                // Default firstSeenAt/lastSeenAt (~43 days apart) are
+                // well past the 7-day seasoning bar -- seasoned
+                // regardless of the real clock.
+                .insert();
+        testData.auction(propertyId)
+                .auctionDatetime(auctionDateTime)
+                .sourceUrl("https://example.com/listing/7001")
+                .insert();
+
+        String html = digestService.render(
+                List.of("NH"),
+                OffsetDateTime.now().minusYears(1),
+                false
+        );
+
+        assertTrue(html.contains("77 Windward Lane, Portsmouth, NH"),
+                "a seasoned listing 15 days out should appear in Upcoming Auctions -- "
+                        + "this is exactly the gap the old flat 7-day window used to miss");
+    }
+
+    @Test
+    void render_omitsUpcomingAuction_inGapWindow_whenUnseasoned() {
+        // Companion to the test above: same 8-29 day gap window, but
+        // zero confirmed history -- should still be suppressed. Confirms
+        // the 30-day cap didn't quietly turn into "show everything
+        // dated" -- the noise filter still applies inside the gap, not
+        // just outside it.
+        String auctionDateTime = LocalDateTime.now().withNano(0).plusDays(15).toString();
+
+        long propertyId = testData.property()
+                .address("88 Windward Lane, Portsmouth, NH")
+                .state("NH")
+                .firstSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .insert();
+        testData.auction(propertyId)
+                .auctionDatetime(auctionDateTime)
+                .sourceUrl("https://example.com/listing/7002")
+                .insert();
+
+        String html = digestService.render(
+                List.of("NH"),
+                OffsetDateTime.now().minusYears(1),
+                false
+        );
+
+        assertFalse(html.contains("88 Windward Lane, Portsmouth, NH"),
+                "unseasoned listing 15 days out is still noise -- the gap fix must not bypass seasoning entirely");
+    }
+
 }

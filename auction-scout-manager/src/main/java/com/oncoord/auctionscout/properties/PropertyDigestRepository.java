@@ -36,7 +36,8 @@ public class PropertyDigestRepository {
 
     public record UpcomingListing(
             long propertyId, String address, String state, Double latitude, Double longitude,
-            String sourceUrl, LocalDateTime auctionDateTime) {}
+            String sourceUrl, LocalDateTime auctionDateTime,
+            OffsetDateTime firstSeenAt, OffsetDateTime lastSeenAt) {}
 
     public record ChangedListing(
             long propertyId, String address, String state, String eventType,
@@ -65,6 +66,12 @@ public class PropertyDigestRepository {
      * trail, not an interpretation of a status string — so it has no
      * business appearing as "upcoming" regardless of what stale
      * auction_datetime or status text is still sitting on the row.
+     *
+     * NOT currently called by DigestService — both the emailed digest
+     * and the status page source their "upcoming" list from findActive()
+     * + DigestService.filterActiveListings() instead, so the two surfaces
+     * show identical properties. Left in place as a plain bounded-window
+     * query in case something else needs one; delete if it stays unused.
      */
     public List<UpcomingListing> findUpcoming(List<String> states, LocalDateTime from, LocalDateTime to) {
         if (states.isEmpty()) {
@@ -74,7 +81,7 @@ public class PropertyDigestRepository {
 
         String sql = """
                 SELECT p.property_id, p.address_raw, p.state, p.latitude, p.longitude,
-                       a.source_url, a.auction_datetime
+                       a.source_url, a.auction_datetime, p.first_seen_at, p.last_seen_at
                 FROM auctions a
                 JOIN properties p ON p.property_id = a.property_id
                 WHERE a.auction_datetime BETWEEN ? AND ?
@@ -103,7 +110,60 @@ public class PropertyDigestRepository {
                 (Double) rs.getObject("latitude"),
                 (Double) rs.getObject("longitude"),
                 rs.getString("source_url"),
-                parseLocal(rs.getString("auction_datetime"))
+                parseLocal(rs.getString("auction_datetime")),
+                parseOffset(rs.getString("first_seen_at")),
+                parseOffset(rs.getString("last_seen_at"))
+        ), args);
+    }
+
+    /**
+     * Same shape as findUpcoming, but open-ended on the future side (no
+     * "to" bound) -- backs the seasoned "active auctions" view, which
+     * isn't a near-term reminder window like findUpcoming's callers use
+     * it for. DigestService applies the 30-day cap and 7-day
+     * seasoning/urgency rule on top of this at the application layer,
+     * not here, so both callers can share one query.
+     */
+    public List<UpcomingListing> findActive(List<String> states, LocalDateTime from) {
+        if (states.isEmpty()) {
+            return List.of();
+        }
+        String placeholders = String.join(",", states.stream().map(s -> "?").toList());
+
+        String sql = """
+                SELECT p.property_id, p.address_raw, p.state, p.latitude, p.longitude,
+                       a.source_url, a.auction_datetime, p.first_seen_at, p.last_seen_at
+                FROM auctions a
+                JOIN properties p ON p.property_id = a.property_id
+                WHERE a.auction_datetime >= ?
+                  AND p.state IN (%s)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM property_duplicate_links d WHERE d.property_id = p.property_id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM auction_events e
+                      WHERE e.auction_id = a.auction_id
+                        AND e.event_type = 'disappeared'
+                        AND e.event_id = (
+                            SELECT MAX(event_id) FROM auction_events WHERE auction_id = a.auction_id
+                        )
+                  )
+                ORDER BY a.auction_datetime
+                """.formatted(placeholders);
+
+        Object[] args = buildArgs(from.toString(), states);
+
+        JdbcTemplate jdbc = dbManager.getJdbcTemplate();
+        return jdbc.query(sql, (rs, rowNum) -> new UpcomingListing(
+                rs.getLong("property_id"),
+                rs.getString("address_raw"),
+                rs.getString("state"),
+                (Double) rs.getObject("latitude"),
+                (Double) rs.getObject("longitude"),
+                rs.getString("source_url"),
+                parseLocal(rs.getString("auction_datetime")),
+                parseOffset(rs.getString("first_seen_at")),
+                parseOffset(rs.getString("last_seen_at"))
         ), args);
     }
 

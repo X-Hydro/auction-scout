@@ -19,15 +19,15 @@ import java.util.Locale;
 
 /**
  * Renders the weekly digest HTML — same structure/CSS as
- * email_preview.html — from live data in auctionscout.db. Deliberately
- * "dumb": shows event_type/old_value/new_value verbatim rather than
- * interpreting them into a fixed vocabulary (see
- * PropertyDigestRepository's javadoc for why).
+ * email_preview.html — from live data in auctionscout.db. Shows
+ * event_type/old_value/new_value verbatim rather than interpreting them
+ * into a fixed vocabulary (see PropertyDigestRepository's javadoc).
  *
  * renderForSubscriber() is the shared entry point for both the status
  * page and the scheduled email job. `truncate` is how they differ:
- * false shows everything (watch page), true caps each section at a
- * few rows with "+N more" links (email).
+ * false shows everything, true caps each section with "+N more" links.
+ * See filterActiveListings() for which properties qualify to be shown
+ * at all — that rule is identical for both.
  */
 @Service
 public class DigestService {
@@ -35,37 +35,34 @@ public class DigestService {
     private static final DateTimeFormatter DAY_HEADER = DateTimeFormatter.ofPattern("EEEE, MMMM d", Locale.US);
     private static final DateTimeFormatter LISTING_META = DateTimeFormatter.ofPattern("MM/dd 'at' h:mm a", Locale.US);
 
-    // A property is exempt from seasoning only if its auction is within
-    // SEASONING_WINDOW_DAYS -- waiting the full window would otherwise
-    // risk running past the auction itself. Beyond that, a property
-    // needs SEASONING_WINDOW_DAYS of confirmed observation (last_seen_at
-    // - first_seen_at) before it's shown at all.
+    // See isSeasoned(): a property needs this many days of confirmed
+    // observation before it counts as trustworthy, not scraper noise.
     private static final int SEASONING_WINDOW_DAYS = 7;
 
-    // Email section caps, only applied when truncate=true. The status
-    // page (truncate=false) always shows everything.
-    private static final int MAX_LISTINGS_PER_DAY = 5;
+    // Email-only caps (truncate=true); the status page always shows
+    // everything. MAX_ACTIVE_LISTINGS_EMAIL is a TOTAL cap on the
+    // Upcoming Auctions section, not per-day.
+    private static final int MAX_ACTIVE_LISTINGS_EMAIL = 5;
     private static final int MAX_CHANGES_PER_BUCKET = 5;
 
     // A change only gets a "View listing/map" link if the auction is
-    // within this many days -- a change on something months out isn't
-    // something to act on right now.
-    private static final int NEW_LISTING_LINK_WINDOW_DAYS  = 21;
+    // within this many days — nothing to act on for one months out.
+    private static final int NEW_LISTING_LINK_WINDOW_DAYS = 21;
+
+    // See filterActiveListings() for how these two combine.
+    private static final int ACTIVE_LISTING_CAP_DAYS = 30;
+    private static final int URGENCY_WAIVER_DAYS = 7;
 
     // status_change values meaning the auction won't happen as listed --
-    // treated as "Removed". Substring match since the pipeline's status
-    // text isn't a controlled vocabulary (spelling already varies, e.g.
-    // cancelled/canceled).
+    // substring match since the pipeline's status text isn't a
+    // controlled vocabulary (e.g. cancelled/canceled both occur).
     private static final List<String> TERMINAL_STATUS_KEYWORDS =
             List.of("cancel", "sold", "third party", "3rd party");
 
-    // status.html and the map are unauthenticated now (see statusUrl())
-    // -- states are public, so that link can be built directly wherever
-    // render() has a states list, no placeholder/replace pass needed.
-    // preferences.html is the one page still gated on session_token
-    // (controls email opt-in, state selection, and Stripe billing), so
-    // its footer link is the only one still built through a placeholder,
-    // since only renderForSubscriber() has an email to mint a token for.
+    // status.html and the map are unauthenticated -- states are public,
+    // so their links are built directly. preferences.html still needs a
+    // session, so its link is the only one built via a magic-link token
+    // (only renderForSubscriber() has an email to mint one for).
     private static final String PREFERENCES_LINK_PLACEHOLDER = "{{PREFERENCES_LINK}}";
 
     private final PropertyDigestRepository repository;
@@ -87,14 +84,12 @@ public class DigestService {
     }
 
     /**
-     * Looks up the subscriber's states, renders their digest, then fills
-     * in the preferences-link placeholder render() left behind.
-     * truncate=true (the actual emailed digest) issues a fresh
-     * auto-login token, since the recipient isn't already logged in
-     * anywhere; truncate=false (the /status HTML view, viewer already
-     * holds a session_token) points at the plain preferences.html URL
-     * instead, so viewing the status page doesn't mint a wasted
-     * single-use token on every load.
+     * Fills in the preferences-link placeholder render() leaves behind.
+     * truncate=true (the real email) issues a fresh auto-login token,
+     * since the recipient isn't already logged in; truncate=false (the
+     * /status view, viewer already has a session) links plain
+     * preferences.html instead, so viewing the page doesn't mint a
+     * wasted single-use token on every load.
      */
     public String renderForSubscriber(String email, OffsetDateTime changesSince, boolean truncate) {
         List<String> states = subscribers.getStates(email);
@@ -106,13 +101,7 @@ public class DigestService {
         return html.replace(PREFERENCES_LINK_PLACEHOLDER, preferencesLink);
     }
 
-    /**
-     * Issues a magic-link token pointing at post-login.html, redirecting
-     * to preferences.html. Expiry is enforced by VerifyController on
-     * consume, same as every other magic link. This is now the only
-     * remaining consumer of the magic-link flow in DigestService --
-     * status.html and the map dropped auth entirely (see statusUrl()).
-     */
+    /** Issues a magic-link token to post-login.html, redirecting to preferences.html. */
     private String buildPreferencesLink(String email) {
         String rawToken = tokenService.issue(email);
         return appBaseUrl + "/auction-scout/post-login.html#email="
@@ -125,23 +114,24 @@ public class DigestService {
      * @param changesSince cutoff for the "what changed" section. Until
      *                      per-subscriber "last sent" tracking exists,
      *                      pass something like "7 days ago".
-     * @param truncate      true for email (cap sections, "+N more"
-     *                      links); false to show everything.
+     * @param truncate      true for email (cap sections, "+N more ->
+     *                      view all" links); false to show everything.
+     *                      Doesn't affect which properties qualify —
+     *                      see filterActiveListings().
      */
     public String render(List<String> states, OffsetDateTime changesSince, boolean truncate) {
         return render(null, states, changesSince, truncate);
     }
 
     /**
-     * @param email the subscriber this digest is for, or null for a bare
-     *              call with no subscriber context (e.g. a unit test).
-     *              Gates the "Removed" bucket against notification
-     *              history — null means nothing is ever shown as
-     *              Removed.
+     * @param email the subscriber this digest is for, or null (e.g. a
+     *              unit test). Gates the "Removed" bucket against
+     *              notification history — null means nothing is ever
+     *              shown as Removed.
      */
     public String render(String email, List<String> states, OffsetDateTime changesSince, boolean truncate) {
         LocalDateTime now = LocalDateTime.now();
-        List<UpcomingListing> upcoming = repository.findUpcoming(states, now, now.plusDays(7));
+        List<UpcomingListing> upcoming = filterActiveListings(repository.findActive(states, now));
         List<ChangedListing> changes = repository.findRecentChanges(states, changesSince);
 
         return """
@@ -167,7 +157,7 @@ public class DigestService {
                     .footer { padding:20px 32px; font-size:11px; color:#999; }
                 </style></head><body><div class='container'>
                 <div class='header'><h1>AuctionScout Auction Watch</h1><p>Weekly update — %s</p></div>
-                <div class='section'><h2>Auctions in the Next 7 Days</h2>
+                <div class='section'><h2>Upcoming Auctions</h2>
                 %s
                 </div>
                 <div class='section'><h2>Status Changes</h2>
@@ -184,14 +174,7 @@ public class DigestService {
         );
     }
 
-    /**
-     * status.html and the map are unauthenticated (see the class-level
-     * note above) -- states aren't sensitive, so this is just a plain,
-     * bookmarkable filtered-view URL, no token involved. Built here
-     * rather than at the renderForSubscriber() call site so the public,
-     * no-subscriber render(states, ...) overload gets a working link
-     * too, not just the per-subscriber path.
-     */
+    /** status.html and the map are unauthenticated -- states aren't sensitive, so this is a plain, bookmarkable URL. */
     private String statusUrl(List<String> states) {
         String stateParam = String.join(",", states);
         return appBaseUrl + "/auction-scout/status.html?states="
@@ -199,37 +182,38 @@ public class DigestService {
     }
 
     private String renderUpcoming(List<UpcomingListing> upcoming, boolean truncate, String viewAllLinkHref) {
-        // Group by day so the per-day cap applies within each day.
+        // Cap applies to the WHOLE list before day-grouping, not per-day
+        // (see MAX_ACTIVE_LISTINGS_EMAIL) -- already ordered by
+        // auction_datetime ascending, see repository.
+        List<UpcomingListing> shown = truncate && upcoming.size() > MAX_ACTIVE_LISTINGS_EMAIL
+                ? upcoming.subList(0, MAX_ACTIVE_LISTINGS_EMAIL)
+                : upcoming;
+        int remaining = upcoming.size() - shown.size();
+
         java.util.Map<String, List<UpcomingListing>> byDay = new java.util.LinkedHashMap<>();
-        for (UpcomingListing listing : upcoming) {
-            // Unparseable auction_datetime -- skip rather than guess a
-            // day to group it under.
+        for (UpcomingListing listing : shown) {
             if (listing.auctionDateTime() == null) {
-                continue;
+                continue; // defensive -- filterActiveListings already drops these upstream
             }
             String day = listing.auctionDateTime().format(DAY_HEADER);
             byDay.computeIfAbsent(day, k -> new java.util.ArrayList<>()).add(listing);
         }
 
         if (byDay.isEmpty()) {
-            return "<p class='empty'>No auctions in the next 7 days for your selected states.</p>";
+            return "<p class='empty'>No active auctions for your selected states.</p>";
         }
 
         StringBuilder html = new StringBuilder();
         for (var entry : byDay.entrySet()) {
-            List<UpcomingListing> dayListings = entry.getValue();
             html.append("<div class='day-header'>").append(entry.getKey()).append("</div>\n");
-
-            int shown = truncate ? Math.min(MAX_LISTINGS_PER_DAY, dayListings.size()) : dayListings.size();
-            for (int i = 0; i < shown; i++) {
-                html.append(renderOneUpcoming(dayListings.get(i)));
+            for (UpcomingListing listing : entry.getValue()) {
+                html.append(renderOneUpcoming(listing));
             }
+        }
 
-            int remaining = dayListings.size() - shown;
-            if (remaining > 0) {
-                html.append("<div class='listing'><span class='empty'>+%d more auction%s this day — <a href='%s'>view all →</a></span></div>\n"
-                        .formatted(remaining, remaining == 1 ? "" : "s", viewAllLinkHref));
-            }
+        if (remaining > 0) {
+            html.append("<p class='empty'>+%d more auction%s — <a href='%s'>view all →</a></p>\n"
+                    .formatted(remaining, remaining == 1 ? "" : "s", viewAllLinkHref));
         }
 
         return html.toString();
@@ -286,31 +270,20 @@ public class DigestService {
         for (List<ChangedListing> group : byAddress.values()) {
             ChangedListing first = group.get(0);
             boolean wasNew = group.stream().anyMatch(c -> "first_seen".equals(c.eventType()));
-            // A structural 'disappeared' event or a terminal
-            // status_change both mean "Removed" -- see isRemovalEvent.
             boolean wasRemoved = group.stream().anyMatch(DigestService::isRemovalEvent);
-            // date_change/price_change are more informative than a bare
-            // "New" tag, so they win the bucket assignment when combined
-            // with a first_seen in the same window. status_change is
-            // excluded here -- it's either folded into wasRemoved
-            // (terminal) or suppressed as noise (isNoiseStatusChange).
+            // date_change/price_change outrank a bare "New" tag when both
+            // land in the same window. status_change isn't listed here --
+            // it's already folded into wasRemoved or noise.
             boolean hasOtherChangeType = group.stream().anyMatch(c ->
                     "date_change".equals(c.eventType()) || "price_change".equals(c.eventType()));
 
-            // Seasoning: a still-far-out, unconfirmed property is
-            // suppressed entirely -- New, Date Change, Removed, and
-            // Price Change alike -- not just from "New". Applying it
-            // uniformly avoids two leaks: a date_change riding alongside
-            // first_seen bypassing a narrower New-only check, and an
-            // unseasoned property later disappearing in a DIFFERENT
-            // digest window (where first_seen is no longer in view)
-            // showing up as an unexplained Removed.
-            if (first.auctionDateTime() != null && first.firstSeenAt() != null && first.lastSeenAt() != null) {
-                boolean farOut = first.auctionDateTime().isAfter(LocalDateTime.now().plusDays(SEASONING_WINDOW_DAYS));
-                boolean notEnoughHistoryYet = first.lastSeenAt().isBefore(first.firstSeenAt().plusDays(SEASONING_WINDOW_DAYS));
-                if (farOut && notEnoughHistoryYet) {
-                    continue;
-                }
+            // Applied uniformly (New/Date/Removed alike), not just to
+            // New -- otherwise a date_change riding alongside first_seen
+            // could bypass a narrower check, and an unseasoned property
+            // could later surface as an unexplained Removed in a
+            // different window where its first_seen isn't in view.
+            if (!isSeasoned(first.auctionDateTime(), first.firstSeenAt(), first.lastSeenAt())) {
+                continue;
             }
 
             // Appeared and vanished within the same window -- the
@@ -379,6 +352,41 @@ public class DigestService {
         all.addAll(statusChangeGroups);
         all.addAll(removedGroups);
         return all;
+    }
+
+    /**
+     * True once a listing has SEASONING_WINDOW_DAYS of confirmed
+     * re-scraping (last_seen_at - first_seen_at), OR its auction is
+     * close enough that the gate doesn't apply (see URGENCY_WAIVER_DAYS
+     * in filterActiveListings). A missing timestamp fails open (treated
+     * as seasoned) rather than hiding a listing over a bookkeeping gap.
+     */
+    private static boolean isSeasoned(LocalDateTime auctionDateTime, OffsetDateTime firstSeenAt, OffsetDateTime lastSeenAt) {
+        if (auctionDateTime == null || firstSeenAt == null || lastSeenAt == null) {
+            return true;
+        }
+        boolean farOut = auctionDateTime.isAfter(LocalDateTime.now().plusDays(SEASONING_WINDOW_DAYS));
+        boolean notEnoughHistoryYet = lastSeenAt.isBefore(firstSeenAt.plusDays(SEASONING_WINDOW_DAYS));
+        return !(farOut && notEnoughHistoryYet);
+    }
+
+    /**
+     * The eligibility rule for "Upcoming Auctions" (email and status
+     * page both use this): dateless listings are always suppressed;
+     * nothing beyond ACTIVE_LISTING_CAP_DAYS out is shown regardless of
+     * seasoning (too likely to be postponed before it matters); inside
+     * that cap, seasoning is required unless the auction is within
+     * URGENCY_WAIVER_DAYS, in which case it's shown regardless -- better
+     * a little noise than missing something happening soon.
+     */
+    private List<UpcomingListing> filterActiveListings(List<UpcomingListing> listings) {
+        LocalDateTime now = LocalDateTime.now();
+        return listings.stream()
+                .filter(l -> l.auctionDateTime() != null)
+                .filter(l -> l.auctionDateTime().isBefore(now.plusDays(ACTIVE_LISTING_CAP_DAYS)))
+                .filter(l -> isSeasoned(l.auctionDateTime(), l.firstSeenAt(), l.lastSeenAt())
+                        || l.auctionDateTime().isBefore(now.plusDays(URGENCY_WAIVER_DAYS)))
+                .toList();
     }
 
     private String renderChanges(List<ChangeGroup> groups, boolean truncate, String viewAllLinkHref) {
@@ -485,19 +493,13 @@ public class DigestService {
                         escape(listing.address()), dateText, labels, changeLinkCell(listing));
     }
 
-    /**
-     * "View listing" + "View map" (if geocoded), or nothing if the
-     * auction is more than NEW_LISTING_LINK_WINDOW_DAYS out or dateless.
-     */
+    /** "View listing"/"View map" links, or "Coming soon" past NEW_LISTING_LINK_WINDOW_DAYS (postponements make a link unreliable that far out), or nothing if dateless. */
     private String changeLinkCell(ChangedListing listing) {
         if (listing.auctionDateTime() == null) {
             return "";
         }
-        boolean withinWindow = listing.auctionDateTime().isBefore(LocalDateTime.now().plusDays(NEW_LISTING_LINK_WINDOW_DAYS ));
+        boolean withinWindow = listing.auctionDateTime().isBefore(LocalDateTime.now().plusDays(NEW_LISTING_LINK_WINDOW_DAYS));
         if (!withinWindow) {
-            // Far-out auctions change too often (postponements,
-            // cancellations) for a link to stay accurate by the time
-            // it's clicked.
             return "<span class='empty'>Coming soon</span>";
         }
 
@@ -576,33 +578,26 @@ public class DigestService {
             boolean linkAvailable   // false once the auction's too far out for a link to stay accurate -- see the old changeLinkCell
     ) {}
 
+    /**
+     * @param upcoming the eligible set per filterActiveListings — same
+     *                 set the email's "Upcoming Auctions" section uses;
+     *                 this method just never truncates it.
+     * @param changes  recent-activity digest.
+     */
     public record DigestData(List<UpcomingRow> upcoming, List<ChangeRow> changes) {}
 
-    /**
-     * Kept for any other subscriber-scoped, per-email caller (e.g. the
-     * scheduled email job, if it ever wants structured data instead of
-     * HTML) -- looks up the subscriber's states, then defers to
-     * renderAsData(). status.html/StatusController no longer go through
-     * this: they call renderAsData() directly with states off the
-     * request, no subscriber lookup involved.
-     */
+    /** Looks up the subscriber's states, then defers to renderAsData(). Kept for any per-email caller wanting structured data instead of HTML. */
     public DigestData renderForSubscriberAsData(String email, OffsetDateTime changesSince) {
         List<String> states = subscribers.getStates(email);
         return renderAsData(states, email, changesSince);
     }
 
     /**
-     * Structured equivalent of render(states, changesSince, false) --
-     * the public/anonymous entry point, now that status.html reads a
-     * plain ?states= list instead of resolving a subscriber via
-     * session_token. Same repository calls and buildChangeGroups rules
-     * as the subscriber-scoped path; the status page uses this single
-     * payload to build both its on-screen DOM and its CSV exports, so
-     * the two can never disagree with each other. No truncate param --
-     * that concept only applies to the emailed digest, never to this
-     * page. No email -- see buildChangeGroups' javadoc: the Removed
-     * bucket is never shown here, since there's no subscriber to check
-     * "was this address ever emailed to them before it disappeared."
+     * Structured, untruncated equivalent of render(states, changesSince,
+     * false) — status.html's data source. No email means the "Removed"
+     * bucket is always empty (see buildChangeGroups: there's no
+     * subscriber to check "were they ever shown this before it
+     * disappeared").
      */
     public DigestData renderAsData(List<String> states, OffsetDateTime changesSince) {
         return renderAsData(states, null, changesSince);
@@ -611,9 +606,8 @@ public class DigestService {
     private DigestData renderAsData(List<String> states, String email, OffsetDateTime changesSince) {
         LocalDateTime now = LocalDateTime.now();
 
-        List<UpcomingListing> upcoming = repository.findUpcoming(states, now, now.plusDays(7));
+        List<UpcomingListing> upcoming = filterActiveListings(repository.findActive(states, now));
         List<UpcomingRow> upcomingRows = upcoming.stream()
-                .filter(l -> l.auctionDateTime() != null)
                 .map(l -> new UpcomingRow(
                         l.propertyId(),
                         l.state(),
