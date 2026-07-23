@@ -103,11 +103,25 @@ public class DigestService {
 
     /** Issues a magic-link token to post-login.html, redirecting to preferences.html. */
     private String buildPreferencesLink(String email) {
+        return buildAutoLoginLink(email, "/auction-scout/preferences.html");
+    }
+
+    /**
+     * Issues a magic-link token to post-login.html, redirecting to an
+     * arbitrary path once authenticated -- generalized out of
+     * buildPreferencesLink() so other subscriber-only email links (e.g.
+     * the saved-property alert's dashboard link) can use the same
+     * pattern instead of a bare, unauthenticated URL. redirectPath may
+     * include its own query string (e.g. "/auction-scout/status.html
+     * ?states=NH,RI") -- it's encoded whole as the outer redirect
+     * param's value, so post-login.html gets it back intact.
+     */
+    private String buildAutoLoginLink(String email, String redirectPath) {
         String rawToken = tokenService.issue(email);
         return appBaseUrl + "/auction-scout/post-login.html#email="
                 + URLEncoder.encode(email, StandardCharsets.UTF_8)
                 + "&token=" + URLEncoder.encode(rawToken, StandardCharsets.UTF_8)
-                + "&redirect=" + URLEncoder.encode("/auction-scout/preferences.html", StandardCharsets.UTF_8);
+                + "&redirect=" + URLEncoder.encode(redirectPath, StandardCharsets.UTF_8);
     }
 
     /**
@@ -242,6 +256,19 @@ public class DigestService {
         }
 
         String preferencesLink = buildPreferencesLink(email);
+        // Auto-login, not a bare statusUrl() link -- status.html's
+        // multi-state view requires a session token to know this is a
+        // real subscriber with an active subscription, not an
+        // anonymous visitor capped to one state. A plain link here
+        // would land them on the "Upgrade to view multiple states"
+        // page despite already being one, which is exactly wrong for a
+        // subscriber-only email like this one (unlike the weekly
+        // digest's "view all" links, which are meant to also work as
+        // bare, sharable URLs -- see statusUrl()'s own doc comment).
+        String statesParam = String.join(",", subscribers.getStates(email));
+        String statusRedirectPath = "/auction-scout/status.html?states="
+                + URLEncoder.encode(statesParam, StandardCharsets.UTF_8);
+        String dashboardLink = buildAutoLoginLink(email, statusRedirectPath);
         return """
                 <html><head><base target="_top"><style>
                     body { font-family: -apple-system, Helvetica, Arial, sans-serif; color: #1a1a1a; margin:0; padding:0; background:#f4f4f4; }
@@ -261,10 +288,13 @@ public class DigestService {
                 <div class='header'><h1>AuctionScout — Saved Property Update</h1><p>Something changed on one of your saved properties</p></div>
                 <div class='section'>
                 %s
+                <p style='margin-top:16px;'><a href='%s'>View on your AuctionScout dashboard →</a></p>
                 </div>
-                <div class='footer'>You're receiving this because one or more of your saved properties changed. <a href='%s'>Manage preferences</a></div>
+                <div class='footer'>You're receiving this because one or more of your saved properties changed. <a href='%s'>Manage preferences</a>
+                <p style='margin-top:8px;font-size:13px;color:#666;'>The links above sign you in automatically and each works once. If a link's already been used, just log in normally from the <a href='%s'>AuctionScout</a> login page.</p>
+                </div>
                 </div></body></html>
-                """.formatted(sections.toString(), preferencesLink);
+                """.formatted(sections.toString(), dashboardLink, preferencesLink, appBaseUrl + "/auction-scout/register.html");
     }
 
     /** status.html and the map are unauthenticated -- states aren't sensitive, so this is a plain, bookmarkable URL. */
