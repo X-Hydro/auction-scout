@@ -39,6 +39,7 @@ class SubscriberRepositoryTest {
 
     private static final Path TEST_DB_DIR = Path.of("src/test/db");
     private static final Path DB_PATH = TEST_DB_DIR.resolve("subscriber-repository-test.db");
+    private static final String USER_NAME = "AuctionScout User";
 
     private SingleConnectionDataSource dataSource;
     private JdbcTemplate jdbc;
@@ -75,9 +76,9 @@ class SubscriberRepositoryTest {
     private String createActiveSubscriber(String email, Long subscriptionStartDate) {
         String token = "tok-" + email;
         jdbc.update(
-                "INSERT INTO subscribers (email, created_at, verified_at, is_active, session_token, " +
-                        "subscription_start_date, email_alerts_enabled) VALUES (?, ?, ?, 1, ?, ?, 1)",
-                email, System.currentTimeMillis(), System.currentTimeMillis(), token, subscriptionStartDate
+                "INSERT INTO subscribers (email, username, created_at, verified_at, is_active, session_token, " +
+                        "subscription_start_date, email_alerts_enabled) VALUES (?, ?, ?, ?, 1, ?, ?, 1)",
+                email, USER_NAME, System.currentTimeMillis(), System.currentTimeMillis(), token, subscriptionStartDate
         );
         return token;
     }
@@ -300,8 +301,9 @@ class SubscriberRepositoryTest {
     @Test
     void setStates_throws_whenSubscriberIsNotVerified() {
         // is_active = 0 row, e.g. registered but never clicked the magic link.
-        jdbc.update("INSERT INTO subscribers (email, created_at, verified_at, is_active) VALUES (?, ?, NULL, 0)",
-                "unverified@example.com", System.currentTimeMillis());
+        jdbc.update("INSERT INTO subscribers (email, username, created_at, verified_at, is_active) " +
+                        "VALUES (?, ?, ?, NULL, 0)",
+                  "unverified@example.com", USER_NAME, System.currentTimeMillis());
 
         assertFalse(repo.findEmailBySessionToken("irrelevant").isPresent());
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,

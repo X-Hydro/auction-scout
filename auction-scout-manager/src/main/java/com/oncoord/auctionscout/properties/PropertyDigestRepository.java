@@ -46,6 +46,10 @@ public class PropertyDigestRepository {
             OffsetDateTime detectedAt,
             String sourceUrl, Double latitude, Double longitude) {}
 
+    public record PropertyDetails(
+            long propertyId, String address, String state, String county,
+            String municipality, Double latitude, Double longitude) {}
+
     private final PropertiesDbConnectionManager dbManager;
 
     public PropertyDigestRepository(PropertiesDbConnectionManager dbManager) {
@@ -236,6 +240,31 @@ public class PropertyDigestRepository {
                 (Double) rs.getObject("latitude"),
                 (Double) rs.getObject("longitude")
         ), args);
+    }
+
+    /**
+     * Single-property lookup by ID, for saved-properties. Unlike the
+     * digest queries above, this deliberately does NOT filter out
+     * duplicate-linked properties (property_duplicate_links) -- a save
+     * should succeed for any property_id that exists, full stop.
+     */
+    public PropertyDetails findById(long propertyId) {
+        String sql = """
+                SELECT property_id, address_raw, state, county, municipality, latitude, longitude
+                FROM properties
+                WHERE property_id = ?
+                """;
+        JdbcTemplate jdbc = dbManager.getJdbcTemplate();
+        List<PropertyDetails> results = jdbc.query(sql, (rs, rowNum) -> new PropertyDetails(
+                rs.getLong("property_id"),
+                rs.getString("address_raw"),
+                rs.getString("state"),
+                rs.getString("county"),
+                rs.getString("municipality"),
+                (Double) rs.getObject("latitude"),
+                (Double) rs.getObject("longitude")
+        ), propertyId);
+        return results.isEmpty() ? null : results.get(0);
     }
 
     private static Object[] buildArgs(String a, String b, List<String> states) {

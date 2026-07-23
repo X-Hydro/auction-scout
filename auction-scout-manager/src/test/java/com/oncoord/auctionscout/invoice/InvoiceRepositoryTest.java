@@ -22,6 +22,7 @@ class InvoiceRepositoryTest {
 
     private static final Path TEST_DB_DIR = Path.of("src/test/db");
     private static final Path DB_PATH = TEST_DB_DIR.resolve("invoice-repository-test.db");
+    private static final String USER_NAME = "AuctionScout User";
 
     private SingleConnectionDataSource dataSource;
     private JdbcTemplate jdbc;
@@ -46,8 +47,8 @@ class InvoiceRepositoryTest {
         // this test reflects realistic data rather than relying on
         // that default being off.
         jdbc.update(
-                "INSERT INTO subscribers (email, created_at, verified_at, is_active) VALUES (?, ?, ?, 1)",
-                "billing-test@example.com", System.currentTimeMillis(), System.currentTimeMillis()
+                "INSERT INTO subscribers (email, username, created_at, verified_at, is_active) VALUES (?, ?, ?, ?, 1)",
+                "billing-test@example.com", USER_NAME, System.currentTimeMillis(), System.currentTimeMillis()
         );
     }
 
