@@ -57,6 +57,26 @@ public class NotificationRepository {
     }
 
     /**
+     * Most recent sent_at for this email + notification type, or empty
+     * if never sent. Unlike sentRecently()'s shared cross-type cooldown
+     * (meant for the welcome/weekly/test trio), this is a per-type
+     * "since when" cutoff -- used by SavedPropertyAlertService so a
+     * weekly digest going out doesn't suppress a saved-property alert
+     * due the next day, and vice versa.
+     */
+    public Optional<Long> findLastSentAtByType(String email, String notificationType) {
+        return jdbc.query(
+                "SELECT MAX(sent_at) AS last_sent FROM email_notifications WHERE email = ? AND notification_type = ?",
+                rs -> {
+                    if (!rs.next()) return Optional.empty();
+                    long v = rs.getLong("last_sent");
+                    return rs.wasNull() ? Optional.<Long>empty() : Optional.of(v);
+                },
+                email, notificationType
+        );
+    }
+
+    /**
      * Whether this email received ANY notification (regardless of
      * type) strictly before the given point in time. Used to gate
      * whether a subscriber can be told a listing was "Removed" — if

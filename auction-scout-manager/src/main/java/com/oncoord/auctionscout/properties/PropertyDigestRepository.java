@@ -267,6 +267,59 @@ public class PropertyDigestRepository {
         return results.isEmpty() ? null : results.get(0);
     }
 
+    /**
+     * Same shape as findRecentChanges, but scoped to an explicit list of
+     * property IDs rather than states, and restricted to
+     * date_change/disappeared events only -- backs the daily
+     * saved-property alert (date changes and removals), not the full
+     * New/Status-Changes/Removed set the weekly digest covers. No
+     * property_duplicate_links exclusion here either, matching
+     * findById()'s reasoning: a saved property should surface its
+     * changes regardless of duplicate-link status.
+     */
+    public List<ChangedListing> findRecentChangesForProperties(List<Long> propertyIds, OffsetDateTime since) {
+        if (propertyIds.isEmpty()) {
+            return List.of();
+        }
+        String placeholders = String.join(",", propertyIds.stream().map(id -> "?").toList());
+
+        String sql = """
+                SELECT p.property_id, p.address_raw, p.state, p.first_seen_at, p.last_seen_at, a.auction_datetime,
+                       e.event_type, e.old_value, e.new_value, e.detected_at,
+                       a.source_url, p.latitude, p.longitude
+                FROM auction_events e
+                JOIN auctions a ON a.auction_id = e.auction_id
+                JOIN properties p ON p.property_id = a.property_id
+                WHERE e.detected_at >= ?
+                  AND p.property_id IN (%s)
+                  AND e.event_type IN ('date_change', 'disappeared')
+                ORDER BY e.detected_at DESC
+                """.formatted(placeholders);
+
+        Object[] args = new Object[1 + propertyIds.size()];
+        args[0] = since.toString();
+        for (int i = 0; i < propertyIds.size(); i++) {
+            args[1 + i] = propertyIds.get(i);
+        }
+
+        JdbcTemplate jdbc = dbManager.getJdbcTemplate();
+        return jdbc.query(sql, (rs, rowNum) -> new ChangedListing(
+                rs.getLong("property_id"),
+                rs.getString("address_raw"),
+                rs.getString("state"),
+                rs.getString("event_type"),
+                rs.getString("old_value"),
+                rs.getString("new_value"),
+                parseLocal(rs.getString("auction_datetime")),
+                parseOffset(rs.getString("first_seen_at")),
+                parseOffset(rs.getString("last_seen_at")),
+                parseOffset(rs.getString("detected_at")),
+                rs.getString("source_url"),
+                (Double) rs.getObject("latitude"),
+                (Double) rs.getObject("longitude")
+        ), args);
+    }
+
     private static Object[] buildArgs(String a, String b, List<String> states) {
         Object[] args = new Object[2 + states.size()];
         args[0] = a;

@@ -174,6 +174,99 @@ public class DigestService {
         );
     }
 
+    /**
+     * Renders the daily saved-property alert email -- Date Changes and
+     * Removed sections only, for an explicit list of property IDs
+     * rather than a subscriber's state list. Reuses
+     * buildChangeGroups()/changeRow()/appendChangeSection() as-is:
+     * since the caller (SavedPropertyAlertService) sources its input
+     * from findRecentChangesForProperties(), which already restricts
+     * to date_change/disappeared events, the shared grouping logic
+     * naturally never produces "New" or generic "Status Changes"
+     * groups from this input -- no extra category filtering needed
+     * here, and the "Removed" everEmailed safety gate in
+     * buildChangeGroups still applies untouched.
+     *
+     * @return null if there's nothing to report -- caller should skip
+     *         sending (and skip recording a notification) in that case
+     */
+    public String renderSavedPropertyAlert(String email, List<Long> propertyIds, OffsetDateTime since) {
+        List<ChangedListing> changes = repository.findRecentChangesForProperties(propertyIds, since);
+        List<ChangeGroup> groups = buildChangeGroups(changes, email);
+        if (groups.isEmpty()) {
+            return null;
+        }
+        return wrapSavedPropertyAlert(email, groups);
+    }
+
+    /**
+     * Test-only counterpart to renderSavedPropertyAlert() -- never
+     * returns null. The real method correctly stays silent (and sends
+     * nothing) when there's nothing to report; a test button needs the
+     * opposite, since the whole point is confirming something lands in
+     * the inbox. Falls back to a clear "no changes found" placeholder
+     * rather than an empty digest, so a test send is never
+     * indistinguishable from a broken one.
+     */
+    public String renderSavedPropertyAlertForTest(String email, List<Long> propertyIds, OffsetDateTime since) {
+        List<ChangedListing> changes = repository.findRecentChangesForProperties(propertyIds, since);
+        List<ChangeGroup> groups = buildChangeGroups(changes, email);
+        return wrapSavedPropertyAlert(email, groups);
+    }
+
+    private String wrapSavedPropertyAlert(String email, List<ChangeGroup> groups) {
+        List<String> dateChangeRows = new java.util.ArrayList<>();
+        List<String> removedRows = new java.util.ArrayList<>();
+        for (ChangeGroup g : groups) {
+            String dateText = g.listing().auctionDateTime() != null
+                    ? g.listing().auctionDateTime().format(LISTING_META)
+                    : "date unknown";
+            String labelsHtml = g.labels().stream()
+                    .map(l -> "<span class='tag'>%s</span>".formatted(escape(l)))
+                    .collect(java.util.stream.Collectors.joining(" "));
+            String row = changeRow(g.listing(), dateText, labelsHtml, g.category());
+            // Only these two categories can appear here -- see javadoc
+            // on renderSavedPropertyAlert().
+            if ("Removed".equals(g.category())) {
+                removedRows.add(row);
+            } else {
+                dateChangeRows.add(row);
+            }
+        }
+
+        StringBuilder sections = new StringBuilder();
+        appendChangeSection(sections, "Date Changes", dateChangeRows, false);
+        appendChangeSection(sections, "Removed", removedRows, false);
+        if (sections.isEmpty()) {
+            sections.append("<p class='empty'>No recent date changes or removals on your saved properties.</p>");
+        }
+
+        String preferencesLink = buildPreferencesLink(email);
+        return """
+                <html><head><base target="_top"><style>
+                    body { font-family: -apple-system, Helvetica, Arial, sans-serif; color: #1a1a1a; margin:0; padding:0; background:#f4f4f4; }
+                    .container { max-width: 640px; margin: 0 auto; background:#ffffff; }
+                    .header { background:#1a3a5c; color:#ffffff; padding:24px 32px; }
+                    .header h1 { margin:0; font-size:20px; }
+                    .header p { margin:4px 0 0; font-size:13px; opacity:0.85; }
+                    .section { padding:24px 32px; }
+                    .day-header { font-size:13px; font-weight:600; color:#666; margin:16px 0 8px; text-transform:uppercase; letter-spacing:0.03em; }
+                    table.status-table { width:100%%; border-collapse:collapse; font-size:13px; }
+                    table.status-table td { padding:8px 4px; border-bottom:1px solid #f0f0f0; }
+                    table.status-table a { color:#1a5c9c; text-decoration:none; }
+                    .tag { display:inline-block; padding:2px 8px; border-radius:3px; font-size:11px; font-weight:600; background:#eef0f4; color:#3a4556; }
+                    .empty { color:#999; font-size:13px; font-style:italic; }
+                    .footer { padding:20px 32px; font-size:11px; color:#999; }
+                </style></head><body><div class='container'>
+                <div class='header'><h1>AuctionScout — Saved Property Update</h1><p>Something changed on one of your saved properties</p></div>
+                <div class='section'>
+                %s
+                </div>
+                <div class='footer'>You're receiving this because one or more of your saved properties changed. <a href='%s'>Manage preferences</a></div>
+                </div></body></html>
+                """.formatted(sections.toString(), preferencesLink);
+    }
+
     /** status.html and the map are unauthenticated -- states aren't sensitive, so this is a plain, bookmarkable URL. */
     private String statusUrl(List<String> states) {
         String stateParam = String.join(",", states);

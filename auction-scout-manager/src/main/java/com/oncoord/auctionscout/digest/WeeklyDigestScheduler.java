@@ -9,6 +9,12 @@ import org.springframework.stereotype.Component;
  * stays correct at 9am local time across the EST/EDT transitions
  * without any code change twice a year.
  *
+ * Does NOT also trigger the saved-property alert (see
+ * SavedPropertyAlertService) -- that's deliberately kicked off
+ * manually, via POST /admin/run-saved-property-alerts, after
+ * confirming the new weekly dataset has actually finished loading,
+ * rather than assuming it's done by a fixed time.
+ *
  * Requires @EnableScheduling on the Spring Boot application class --
  * add it there if it isn't already present, or scheduled methods are
  * silently never invoked.
