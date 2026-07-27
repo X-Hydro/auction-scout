@@ -23,7 +23,7 @@ public class CorsConfig implements WebMvcConfigurer {
                         "http://localhost:8080",       // local static server, per Thale's setup
                         "https://www.oncoord.com"       // production
                 )
-                .allowedMethods("GET", "POST")
+                .allowedMethods("GET", "POST", "DELETE", "PUT")
                 // X-Session-Token is a custom header, so browsers preflight
                 // it with an OPTIONS request first — without this explicit
                 // allow, the preflight itself gets rejected and the real
