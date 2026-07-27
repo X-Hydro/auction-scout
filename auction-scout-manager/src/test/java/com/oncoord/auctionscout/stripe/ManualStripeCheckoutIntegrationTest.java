@@ -71,7 +71,7 @@ class ManualStripeCheckoutIntegrationTest {
     // application.properties, unless AUCTIONSCOUT_DB_PATH is set to
     // something else for your local run.
     private static final String DB_PATH = "./data/auctionscout-manage.db";
-    private static final String APP_BASE_URL = "http://localhost:8081";
+    private static final String APP_BASE_URL = "http://localhost:8051";
     private static final Duration POLL_TIMEOUT = Duration.ofMinutes(2);
     private static final Duration POLL_INTERVAL = Duration.ofSeconds(3);
 
