@@ -29,12 +29,27 @@ Design notes:
 """
 
 import json
+import os
+import re
 import sqlite3
-import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from datetime import date
 import shutil
+
+
+def _normalize_path(path: str) -> str:
+    """Accepts Windows paths ("C:/..." or "C:\\...") as-is, and converts
+    Git Bash / MSYS-style paths ("/c/dev/...") into native Windows paths
+    ("C:/dev/...") on Windows so sqlite3/open() can resolve them correctly.
+    No-op on non-Windows platforms."""
+    if os.name == "nt":
+        m = re.match(r"^/([A-Za-z])/(.*)$", path)
+        if m:
+            drive, rest = m.groups()
+            path = f"{drive.upper()}:/{rest}"
+    return path
+
 
 
 # Statuses that mean the auction is over and should NOT appear on the live map.
@@ -60,6 +75,9 @@ STALE_AFTER_DAYS = 14
 
 
 def export(db_path: str, json_path: str):
+    db_path = _normalize_path(db_path)
+    json_path = _normalize_path(json_path)
+
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
 
@@ -256,8 +274,35 @@ def export(db_path: str, json_path: str):
 
 
 if __name__ == "__main__":
-    db_path = sys.argv[1] if len(sys.argv) > 1 else "auctionscout.db"
-    json_path = sys.argv[2] if len(sys.argv) > 2 else "scout-properties.json"
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Export current property/auction state from SQLite into a "
+                     "properties.json file for the frontend map.",
+        epilog="Examples:\n"
+               "  python export_json.py\n"
+               "  python export_json.py --db auctionscout.db --json scout-properties.json\n"
+               "  python export_json.py --db /c/dev/auction-scout/auction-scout-data/auctionscout.db "
+               "--json /c/dev/auction-scout/scout-properties.json",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--db",
+        default="auctionscout.db",
+        help="SQLite database file to read from (default: auctionscout.db). "
+             "Accepts Windows (C:/...) or Git Bash (/c/...) style paths."
+    )
+    parser.add_argument(
+        "--json",
+        dest="json_path",
+        default="scout-properties.json",
+        help="Output JSON file for the frontend map (default: scout-properties.json)."
+    )
+
+    args = parser.parse_args()
+    db_path = _normalize_path(args.db)
+    json_path = _normalize_path(args.json_path)
+
     export(db_path, json_path)
 
     json_backup = Path(f"{json_path}.{date.today():%Y.%m.%d}")

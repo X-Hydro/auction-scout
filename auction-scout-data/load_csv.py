@@ -28,6 +28,19 @@ from dateutil import parser as dateparser
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+def _normalize_path(path: str) -> str:
+    """Accepts Windows paths ("C:/..." or "C:\\...") as-is, and converts
+    Git Bash / MSYS-style paths ("/c/dev/...") into native Windows paths
+    ("C:/dev/...") on Windows so sqlite3/os can resolve them correctly.
+    No-op on non-Windows platforms."""
+    if os.name == "nt":
+        m = re.match(r"^/([A-Za-z])/(.*)$", path)
+        if m:
+            drive, rest = m.groups()
+            path = f"{drive.upper()}:/{rest}"
+    return path
+
+
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -322,6 +335,9 @@ def build_report(run_id, started_at, csv_path, db_path, records_found, records_n
 
 
 def load(csv_path: str, db_path: str):
+    csv_path = _normalize_path(csv_path)
+    db_path = _normalize_path(db_path)
+
     if not os.path.exists(csv_path):
         print(f"ERROR: CSV file not found: {csv_path}")
         sys.exit(1)
