@@ -21,8 +21,8 @@ import java.util.Optional;
 @Repository
 public class SubscriberRepository {
 
-    private static final int MAX_STATES_PER_SUBSCRIBER = 4;
-    private static final int MAX_STATES_FREE = 1;
+    public static final int MAX_STATES_PER_SUBSCRIBER = 4;
+    public static final int MAX_STATES_FREE = 1;
 
     private static final SecureRandom RANDOM = new SecureRandom();
 

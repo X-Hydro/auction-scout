@@ -96,11 +96,15 @@ public class StatusController {
                 .map(subscribers::hasActiveStripeSubscription)
                 .orElse(false);
 
-        if (!subscribed && stateList.size() > 1) {
+        int maxStates = subscribed ? SubscriberRepository.MAX_STATES_PER_SUBSCRIBER : 1;
+
+        if (stateList.size() > maxStates) {
             return ResponseEntity.status(403).body(java.util.Map.of(
-                    "error", "Free accounts can view 1 state at a time. " +
+                    "error", subscribed
+                            ? "Your plan allows up to " + maxStates + " states at a time."
+                            : "Free accounts can view 1 state at a time. " +
                             "Log in with an active subscription to view more.",
-                    "maxStates", 1
+                    "maxStates", maxStates
             ));
         }
 
