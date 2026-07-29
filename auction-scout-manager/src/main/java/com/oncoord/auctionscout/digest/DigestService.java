@@ -139,9 +139,15 @@ public class DigestService {
 
     /**
      * @param email the subscriber this digest is for, or null (e.g. a
-     *              unit test). Gates the "Removed" bucket against
-     *              notification history — null means nothing is ever
-     *              shown as Removed.
+     *              unit test). Always gates the "Removed" bucket
+     *              against notification history, regardless of
+     *              truncate -- null email means nothing is ever shown
+     *              as Removed. This applies equally to the real weekly
+     *              email (truncate=true) and the dead, subscriber-
+     *              authenticated /status page (truncate=false) -- both
+     *              represent a specific, identified subscriber, unlike
+     *              the fully anonymous status.html dashboard, which
+     *              never gates at all (see renderAsData/buildChangeGroups).
      */
     public String render(String email, List<String> states, OffsetDateTime changesSince, boolean truncate) {
         LocalDateTime now = LocalDateTime.now();
@@ -182,7 +188,7 @@ public class DigestService {
                 """.formatted(
                 now.format(DateTimeFormatter.ofPattern("MMMM d, yyyy", Locale.US)),
                 renderUpcoming(upcoming, truncate, statusUrl(states)),
-                renderChanges(buildChangeGroups(changes, email), truncate, statusUrl(states)),
+                renderChanges(buildChangeGroups(changes, email, true), truncate, statusUrl(states)),
                 PREFERENCES_LINK_PLACEHOLDER,
                 PREFERENCES_LINK_PLACEHOLDER
         );
@@ -198,15 +204,15 @@ public class DigestService {
      * to date_change/disappeared events, the shared grouping logic
      * naturally never produces "New" or generic "Status Changes"
      * groups from this input -- no extra category filtering needed
-     * here, and the "Removed" everEmailed safety gate in
-     * buildChangeGroups still applies untouched.
+     * here. Always gates Removed against notification history (this is
+     * always a real email send) -- see buildChangeGroups.
      *
      * @return null if there's nothing to report -- caller should skip
      *         sending (and skip recording a notification) in that case
      */
     public String renderSavedPropertyAlert(String email, List<Long> propertyIds, OffsetDateTime since) {
         List<ChangedListing> changes = repository.findRecentChangesForProperties(propertyIds, since);
-        List<ChangeGroup> groups = buildChangeGroups(changes, email);
+        List<ChangeGroup> groups = buildChangeGroups(changes, email, true);
         if (groups.isEmpty()) {
             return null;
         }
@@ -224,7 +230,7 @@ public class DigestService {
      */
     public String renderSavedPropertyAlertForTest(String email, List<Long> propertyIds, OffsetDateTime since) {
         List<ChangedListing> changes = repository.findRecentChangesForProperties(propertyIds, since);
-        List<ChangeGroup> groups = buildChangeGroups(changes, email);
+        List<ChangeGroup> groups = buildChangeGroups(changes, email, true);
         return wrapSavedPropertyAlert(email, groups);
     }
 
@@ -361,21 +367,35 @@ public class DigestService {
 
     /**
      * One address's worth of change activity, already put through the
-     * seasoning/dedup/everEmailed rules and assigned a bucket. Shared
+     * seasoning/dedup/removal rules and assigned a bucket. Shared
      * between the HTML digest and the CSV export so both stay in sync —
      * see buildChangeGroups.
      */
     private record ChangeGroup(ChangedListing listing, String category, List<String> labels) {}
 
     /**
-     * Groups changes by address, applies the seasoning/dedup/everEmailed
-     * rules, and assigns each surviving address to a category (New,
-     * Date Changes, Status Changes, Removed). This is the one place
-     * that logic lives — both renderChanges (HTML) and changesCsv build
-     * off this same list, so a rule change here can't drift between the
-     * two outputs.
+     * Groups changes by address, applies the seasoning/dedup rules, and
+     * assigns each surviving address to a category (New, Date Changes,
+     * Status Changes, Removed). This is the one place that logic
+     * lives — both renderChanges (HTML) and the status.html/CSV data
+     * path build off this same list, so a rule change here can't drift
+     * between outputs.
+     *
+     * @param email subscriber this is being built for, or null. Only
+     *              consulted when gateRemovedOnNotificationHistory is
+     *              true — ignored otherwise.
+     * @param gateRemovedOnNotificationHistory true for an actual email
+     *              send (weekly digest, saved-property alert): a
+     *              removal is only surfaced if this subscriber was
+     *              already emailed about the property before it
+     *              disappeared, so nobody gets an unsolicited "this
+     *              thing you never knew about is gone" email. false
+     *              for a live page view (status.html): removals show
+     *              unconditionally, same as every other category —
+     *              there's no equivalent risk of surprise when
+     *              someone's actively looking at the page right now.
      */
-    private List<ChangeGroup> buildChangeGroups(List<ChangedListing> changes, String email) {
+    private List<ChangeGroup> buildChangeGroups(List<ChangedListing> changes, String email, boolean gateRemovedOnNotificationHistory) {
         // Group by address so a property with multiple events this
         // window collapses into one entry with combined labels, not one
         // entry per event.
@@ -416,21 +436,24 @@ public class DigestService {
             }
 
             if (wasRemoved) {
-                // Only announce Removed if this subscriber was actually
-                // emailed before the removal was detected -- otherwise
-                // they're being told something disappeared that they
-                // never knew existed. Null email (no subscriber context)
-                // counts as "never emailed".
-                OffsetDateTime disappearedAt = group.stream()
-                        .filter(DigestService::isRemovalEvent)
-                        .map(ChangedListing::detectedAt)
-                        .filter(java.util.Objects::nonNull)
-                        .max(OffsetDateTime::compareTo)
-                        .orElse(null);
-                boolean everEmailed = email != null && disappearedAt != null
-                        && notifications.hasSentBefore(email, disappearedAt.toInstant().toEpochMilli());
-                if (!everEmailed) {
-                    continue;
+                if (gateRemovedOnNotificationHistory) {
+                    // Only announce Removed if this subscriber was
+                    // actually emailed before the removal was detected
+                    // -- otherwise they're being told something
+                    // disappeared that they never knew existed. Null
+                    // email (no subscriber context) counts as "never
+                    // emailed".
+                    OffsetDateTime disappearedAt = group.stream()
+                            .filter(DigestService::isRemovalEvent)
+                            .map(ChangedListing::detectedAt)
+                            .filter(java.util.Objects::nonNull)
+                            .max(OffsetDateTime::compareTo)
+                            .orElse(null);
+                    boolean everEmailed = email != null && disappearedAt != null
+                            && notifications.hasSentBefore(email, disappearedAt.toInstant().toEpochMilli());
+                    if (!everEmailed) {
+                        continue;
+                    }
                 }
                 removedGroups.add(new ChangeGroup(first, "Removed", List.of("Removed")));
             } else if (wasNew && !hasOtherChangeType) {
@@ -717,15 +740,29 @@ public class DigestService {
 
     /**
      * Structured, untruncated equivalent of render(states, changesSince,
-     * false) — status.html's data source. No email means the "Removed"
-     * bucket is always empty (see buildChangeGroups: there's no
-     * subscriber to check "were they ever shown this before it
-     * disappeared").
+     * false) — status.html's data source, called with no subscriber
+     * context (see StatusController). Defers to the email-aware overload
+     * below with email=null.
      */
     public DigestData renderAsData(List<String> states, OffsetDateTime changesSince) {
         return renderAsData(states, null, changesSince);
     }
 
+    /**
+     * @param email subscriber this is being built for, or null (the
+     *              status.html/CSV path always passes null today, since
+     *              StatusController doesn't resolve one -- kept as a
+     *              real parameter rather than dropped, since it's the
+     *              natural key for any future subscriber-specific
+     *              behavior on this data path).
+     *
+     * Removed items are shown unconditionally on this path regardless
+     * of whether email is present -- gateRemovedOnNotificationHistory
+     * is hardcoded false below. The notification-history gate only
+     * applies to actual email sends (the weekly digest and
+     * saved-property alerts, via render()/renderSavedPropertyAlert());
+     * see buildChangeGroups.
+     */
     private DigestData renderAsData(List<String> states, String email, OffsetDateTime changesSince) {
         LocalDateTime now = LocalDateTime.now();
 
@@ -744,7 +781,7 @@ public class DigestService {
                 .toList();
 
         List<ChangedListing> changes = repository.findRecentChanges(states, changesSince);
-        List<ChangeRow> changeRows = buildChangeGroups(changes, email).stream()
+        List<ChangeRow> changeRows = buildChangeGroups(changes, email, /* gateRemovedOnNotificationHistory */ false).stream()
                 .map(g -> new ChangeRow(
                         g.listing().propertyId(),
                         g.listing().state(),
