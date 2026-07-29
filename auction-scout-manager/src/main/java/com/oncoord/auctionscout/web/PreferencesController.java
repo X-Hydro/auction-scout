@@ -2,6 +2,7 @@ package com.oncoord.auctionscout.web;
 
 import com.oncoord.auctionscout.digest.DigestSendService;
 import com.oncoord.auctionscout.subscriber.SubscriberRepository;
+import com.stripe.exception.InvalidRequestException;
 import com.stripe.exception.StripeException;
 import com.stripe.model.Subscription;
 import com.stripe.model.SubscriptionItem;
@@ -138,8 +139,29 @@ public class PreferencesController {
             Long currentPeriodEnd = items.get(0).getCurrentPeriodEnd();
             return new SubscriptionDateInfo(
                     currentPeriodEnd == null ? null : epochSecondsToIsoDate(currentPeriodEnd), cancelAtPeriodEnd);
+        } catch (InvalidRequestException e) {
+            if ("resource_missing".equals(e.getCode())) {
+                // Subscription genuinely not found in Stripe. First
+                // check: is AUCTIONSCOUT_STRIPE_SECRET_KEY in .env
+                // pointing at the right mode/sandbox? Not auto-
+                // deactivating -- needs a human to confirm before
+                // touching subscriber access.
+                log.log(Level.SEVERE, "Subscription " + stripeSubscriptionId.get()
+                        + " for " + email + " returned resource_missing from Stripe -- "
+                        + "local record says " + status + " but Stripe has no matching subscription. "
+                        + "Needs manual investigation; not auto-deactivating.", e);
+                return new SubscriptionDateInfo(null, false);
+            }
+            // Some other Stripe-reported request problem -- degrade
+            // gracefully without touching local state, same as the
+            // general StripeException case below.
+            log.log(Level.WARNING, "Could not fetch subscription date from Stripe for " + email, e);
+            return new SubscriptionDateInfo(null, false);
         } catch (StripeException e) {
-            // Log and degrade gracefully -- see javadoc above.
+            // Log and degrade gracefully -- see javadoc above. Covers
+            // transient failures (network issues, Stripe outages) where
+            // retrying later is the right move, so local state is left
+            // alone.
             log.log(Level.WARNING, "Could not fetch subscription date from Stripe for " + email, e);
             return new SubscriptionDateInfo(null, false);
         }
