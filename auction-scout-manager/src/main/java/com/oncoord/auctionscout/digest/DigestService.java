@@ -117,9 +117,10 @@ public class DigestService {
      * param's value, so post-login.html gets it back intact.
      */
     private String buildAutoLoginLink(String email, String redirectPath) {
-        String rawToken = tokenService.issue(email);
+        String normalizedEmail = email.trim().toLowerCase();
+        String rawToken = tokenService.issue(normalizedEmail);
         return appBaseUrl + "/auction-scout/post-login.html#email="
-                + URLEncoder.encode(email, StandardCharsets.UTF_8)
+                + URLEncoder.encode(normalizedEmail, StandardCharsets.UTF_8)
                 + "&token=" + URLEncoder.encode(rawToken, StandardCharsets.UTF_8)
                 + "&redirect=" + URLEncoder.encode(redirectPath, StandardCharsets.UTF_8);
     }
