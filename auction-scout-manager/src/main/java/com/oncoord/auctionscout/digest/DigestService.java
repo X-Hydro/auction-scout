@@ -98,14 +98,15 @@ public class DigestService {
      * preferences.html instead, so viewing the page doesn't mint a
      * wasted single-use token on every load.
      */
-    public String renderForSubscriber(String email, OffsetDateTime changesSince, boolean truncate) {
+    public RenderedDigest renderForSubscriber(String email, OffsetDateTime changesSince, boolean truncate) {
         List<String> states = subscribers.getStates(email);
-        String html = render(email, states, changesSince, truncate);
+        RenderedDigest rendered = render(email, states, changesSince, truncate);
 
         String preferencesLink = truncate
                 ? buildPreferencesLink(email)
                 : appBaseUrl + "/auction-scout/preferences.html";
-        return html.replace(PREFERENCES_LINK_PLACEHOLDER, preferencesLink);
+        String html = rendered.html().replace(PREFERENCES_LINK_PLACEHOLDER, preferencesLink);
+        return new RenderedDigest(html, rendered.shownPropertyIds());
     }
 
     /** Issues a one-time token to post-login.html, redirecting to preferences.html. */
@@ -145,9 +146,21 @@ public class DigestService {
      *                      Doesn't affect which properties qualify —
      *                      see filterActiveListings().
      */
-    public String render(List<String> states, OffsetDateTime changesSince, boolean truncate) {
+    public RenderedDigest render(List<String> states, OffsetDateTime changesSince, boolean truncate) {
         return render(null, states, changesSince, truncate);
     }
+
+    /**
+     * HTML for a rendered digest email plus every property ID actually
+     * shown in it (Upcoming Auctions and Changes sections alike, post-
+     * truncation -- a property beyond a section's cap only gets a "+N
+     * more" link, not real placement, so it doesn't count as shown).
+     * NotificationRepository.recordSent() writes shownPropertyIds
+     * alongside the notification row so a later Removed-gate check
+     * (hasSentPropertyBefore) can be scoped to what this subscriber
+     * actually saw, not just whether they were emailed at all.
+     */
+    public record RenderedDigest(String html, List<Long> shownPropertyIds) {}
 
     /**
      * @param email the subscriber this digest is for, or null (e.g. a
@@ -161,7 +174,7 @@ public class DigestService {
      *              the fully anonymous status.html dashboard, which
      *              never gates at all (see renderAsData/buildChangeGroups).
      */
-    public String render(String email, List<String> states, OffsetDateTime changesSince, boolean truncate) {
+    public RenderedDigest render(String email, List<String> states, OffsetDateTime changesSince, boolean truncate) {
         LocalDateTime now = LocalDateTime.now();
         List<UpcomingListing> upcoming = filterActiveListings(repository.findActive(states, now));
         List<ChangedListing> changes = repository.findRecentChanges(states, changesSince);
@@ -172,7 +185,13 @@ public class DigestService {
         // buildPreferencesLink's truncate check just above.
         String viewToken = (email != null && truncate) ? tokenService.issue(email) : null;
 
-        return """
+        // Collects the propertyId of every listing actually rendered
+        // below (post-truncation) -- see RenderedDigest.
+        List<Long> shownIds = new java.util.ArrayList<>();
+        String upcomingHtml = renderUpcoming(upcoming, truncate, statusUrl(states, viewToken), shownIds);
+        String changesHtml = renderChanges(buildChangeGroups(changes, email, true), truncate, statusUrl(states, viewToken), shownIds);
+
+        String html = """
                 <html><head><base target="_top"><style>
                     body { font-family: -apple-system, Helvetica, Arial, sans-serif; color: #1a1a1a; margin:0; padding:0; background:#f4f4f4; }
                     .container { max-width: 640px; margin: 0 auto; background:#ffffff; }
@@ -205,11 +224,12 @@ public class DigestService {
                 </div></body></html>
                 """.formatted(
                 now.format(DateTimeFormatter.ofPattern("MMMM d, yyyy", Locale.US)),
-                renderUpcoming(upcoming, truncate, statusUrl(states, viewToken)),
-                renderChanges(buildChangeGroups(changes, email, true), truncate, statusUrl(states, viewToken)),
+                upcomingHtml,
+                changesHtml,
                 PREFERENCES_LINK_PLACEHOLDER,
                 PREFERENCES_LINK_PLACEHOLDER
         );
+        return new RenderedDigest(html, shownIds.stream().distinct().toList());
     }
 
     /**
@@ -218,23 +238,31 @@ public class DigestService {
      * rather than a subscriber's state list. Reuses
      * buildChangeGroups()/changeRow()/appendChangeSection() as-is:
      * since the caller (SavedPropertyAlertService) sources its input
-     * from findRecentChangesForProperties(), which already restricts
-     * to date_change/disappeared events, the shared grouping logic
-     * naturally never produces "New" or generic "Status Changes"
-     * groups from this input -- no extra category filtering needed
-     * here. Always gates Removed against notification history (this is
-     * always a real email send) -- see buildChangeGroups.
+     * from findRecentChangesForProperties(), which restricts to
+     * date_change/disappeared/status_change events, the shared grouping
+     * logic naturally never produces a "New" group from this input (no
+     * first_seen events reach it), and a status_change either lands in
+     * Removed (terminal) or is silently dropped as noise (non-terminal)
+     * -- so this never produces a generic "Status Changes" group either,
+     * no extra category filtering needed here. Always gates Removed
+     * against notification history (this is always a real email send)
+     * -- see buildChangeGroups.
      *
      * @return null if there's nothing to report -- caller should skip
      *         sending (and skip recording a notification) in that case
      */
-    public String renderSavedPropertyAlert(String email, List<Long> propertyIds, OffsetDateTime since) {
+    public RenderedDigest renderSavedPropertyAlert(String email, List<Long> propertyIds, OffsetDateTime since) {
         List<ChangedListing> changes = repository.findRecentChangesForProperties(propertyIds, since);
         List<ChangeGroup> groups = buildChangeGroups(changes, email, true);
         if (groups.isEmpty()) {
             return null;
         }
-        return wrapSavedPropertyAlert(email, groups);
+        String html = wrapSavedPropertyAlert(email, groups);
+        // Never truncated -- wrapSavedPropertyAlert's appendChangeSection
+        // calls are always truncate=false -- so every group here really
+        // did land in the email, unlike render()'s post-truncation filtering.
+        List<Long> shownIds = groups.stream().map(g -> g.listing().propertyId()).distinct().toList();
+        return new RenderedDigest(html, shownIds);
     }
 
     /**
@@ -256,13 +284,7 @@ public class DigestService {
         List<String> dateChangeRows = new java.util.ArrayList<>();
         List<String> removedRows = new java.util.ArrayList<>();
         for (ChangeGroup g : groups) {
-            String dateText = g.listing().auctionDateTime() != null
-                    ? g.listing().auctionDateTime().format(LISTING_META)
-                    : "date unknown";
-            String labelsHtml = g.labels().stream()
-                    .map(l -> "<span class='tag'>%s</span>".formatted(escape(l)))
-                    .collect(java.util.stream.Collectors.joining(" "));
-            String row = changeRow(g.listing(), dateText, labelsHtml, g.category());
+            String row = changeGroupRow(g);
             // Only these two categories can appear here -- see javadoc
             // on renderSavedPropertyAlert().
             if ("Removed".equals(g.category())) {
@@ -331,7 +353,7 @@ public class DigestService {
         return viewToken == null ? url : url + "&vt=" + URLEncoder.encode(viewToken, StandardCharsets.UTF_8);
     }
 
-    private String renderUpcoming(List<UpcomingListing> upcoming, boolean truncate, String viewAllLinkHref) {
+    private String renderUpcoming(List<UpcomingListing> upcoming, boolean truncate, String viewAllLinkHref, List<Long> shownIds) {
         // Cap applies to the WHOLE list before day-grouping, not per-day
         // (see MAX_ACTIVE_LISTINGS_EMAIL) -- already ordered by
         // auction_datetime ascending, see repository.
@@ -358,6 +380,7 @@ public class DigestService {
             html.append("<div class='day-header'>").append(entry.getKey()).append("</div>\n");
             for (UpcomingListing listing : entry.getValue()) {
                 html.append(renderOneUpcoming(listing));
+                shownIds.add(listing.propertyId());
             }
         }
 
@@ -459,20 +482,27 @@ public class DigestService {
             if (wasRemoved) {
                 if (gateRemovedOnNotificationHistory) {
                     // Only announce Removed if this subscriber was
-                    // actually emailed before the removal was detected
-                    // -- otherwise they're being told something
-                    // disappeared that they never knew existed. Null
-                    // email (no subscriber context) counts as "never
-                    // emailed".
+                    // actually shown THIS property before the removal
+                    // was detected -- otherwise they're being told
+                    // something disappeared that they never knew
+                    // existed. Property-scoped (hasSentPropertyBefore),
+                    // not just "were they emailed at all" -- a
+                    // subscriber who's received other digests but never
+                    // one containing this property shouldn't pass this
+                    // gate for it. Null email (no subscriber context)
+                    // counts as "never shown". Uses first.propertyId()
+                    // as the group's representative property, same as
+                    // first.auctionDateTime()/firstSeenAt()/lastSeenAt()
+                    // already do above.
                     OffsetDateTime disappearedAt = group.stream()
                             .filter(DigestService::isRemovalEvent)
                             .map(ChangedListing::detectedAt)
                             .filter(java.util.Objects::nonNull)
                             .max(OffsetDateTime::compareTo)
                             .orElse(null);
-                    boolean everEmailed = email != null && disappearedAt != null
-                            && notifications.hasSentBefore(email, disappearedAt.toInstant().toEpochMilli());
-                    if (!everEmailed) {
+                    boolean everShown = email != null && disappearedAt != null
+                            && notifications.hasSentPropertyBefore(email, first.propertyId(), disappearedAt.toInstant().toEpochMilli());
+                    if (!everShown) {
                         continue;
                     }
                 }
@@ -562,36 +592,29 @@ public class DigestService {
                 .toList();
     }
 
-    private String renderChanges(List<ChangeGroup> groups, boolean truncate, String viewAllLinkHref) {
+    private String renderChanges(List<ChangeGroup> groups, boolean truncate, String viewAllLinkHref, List<Long> shownIds) {
         // Each address lands in exactly one bucket (see buildChangeGroups),
         // so "+N more" applies per category.
-        List<String> newRows = new java.util.ArrayList<>();
-        List<String> dateChangeRows = new java.util.ArrayList<>();
-        List<String> statusChangeRows = new java.util.ArrayList<>();
-        List<String> removedRows = new java.util.ArrayList<>();
+        List<ChangeGroup> newGroups = new java.util.ArrayList<>();
+        List<ChangeGroup> dateChangeGroups = new java.util.ArrayList<>();
+        List<ChangeGroup> statusChangeGroups = new java.util.ArrayList<>();
+        List<ChangeGroup> removedGroups = new java.util.ArrayList<>();
 
         for (ChangeGroup g : groups) {
-            String dateText = g.listing().auctionDateTime() != null
-                    ? g.listing().auctionDateTime().format(LISTING_META)
-                    : "date unknown";
-            String labelsHtml = g.labels().stream()
-                    .map(l -> "<span class='tag'>%s</span>".formatted(escape(l)))
-                    .collect(java.util.stream.Collectors.joining(" "));
-            String row = changeRow(g.listing(), dateText, labelsHtml, g.category());
             switch (g.category()) {
-                case "New" -> newRows.add(row);
-                case "Date Changes" -> dateChangeRows.add(row);
-                case "Removed" -> removedRows.add(row);
-                default -> statusChangeRows.add(row);
+                case "New" -> newGroups.add(g);
+                case "Date Changes" -> dateChangeGroups.add(g);
+                case "Removed" -> removedGroups.add(g);
+                default -> statusChangeGroups.add(g);
             }
         }
 
         StringBuilder html = new StringBuilder();
         boolean anyTruncated = false;
-        anyTruncated |= appendChangeSection(html, "New Listings", newRows, truncate);
-        anyTruncated |= appendChangeSection(html, "Date Changes", dateChangeRows, truncate);
-        anyTruncated |= appendChangeSection(html, "Status Changes", statusChangeRows, truncate);
-        anyTruncated |= appendChangeSection(html, "Removed", removedRows, truncate);
+        anyTruncated |= appendChangeSection(html, "New Listings", newGroups, truncate, shownIds);
+        anyTruncated |= appendChangeSection(html, "Date Changes", dateChangeGroups, truncate, shownIds);
+        anyTruncated |= appendChangeSection(html, "Status Changes", statusChangeGroups, truncate, shownIds);
+        anyTruncated |= appendChangeSection(html, "Removed", removedGroups, truncate, shownIds);
 
         if (html.isEmpty()) {
             return "<p class='empty'>No status changes to report this week.</p>";
@@ -603,6 +626,17 @@ public class DigestService {
         }
 
         return html.toString();
+    }
+
+    /** Builds one table row for a ChangeGroup -- shared by renderChanges' appendChangeSection and wrapSavedPropertyAlert. */
+    private String changeGroupRow(ChangeGroup g) {
+        String dateText = g.listing().auctionDateTime() != null
+                ? g.listing().auctionDateTime().format(LISTING_META)
+                : "date unknown";
+        String labelsHtml = g.labels().stream()
+                .map(l -> "<span class='tag'>%s</span>".formatted(escape(l)))
+                .collect(java.util.stream.Collectors.joining(" "));
+        return changeRow(g.listing(), dateText, labelsHtml, g.category());
     }
 
     /**
@@ -699,6 +733,38 @@ public class DigestService {
         html.append("<table class='status-table'>\n");
         for (int i = 0; i < shown; i++) {
             html.append(rows.get(i));
+        }
+        html.append("</table>\n");
+
+        if (remaining > 0) {
+            html.append("<p class='empty'>+%d more</p>\n".formatted(remaining));
+        }
+
+        return remaining > 0;
+    }
+
+    /**
+     * Same as the String-rows overload above, but builds each row from a
+     * ChangeGroup and records the propertyId of every row actually
+     * rendered (post-truncation) into shownIds -- used by renderChanges(),
+     * which needs to know exactly what landed in the email body. The
+     * String-rows overload stays as-is for wrapSavedPropertyAlert(),
+     * which never truncates and so doesn't need this tracking.
+     */
+    private boolean appendChangeSection(StringBuilder html, String heading, List<ChangeGroup> groups, boolean truncate, List<Long> shownIds) {
+        if (groups.isEmpty()) {
+            return false;
+        }
+
+        int shown = truncate ? Math.min(MAX_CHANGES_PER_BUCKET, groups.size()) : groups.size();
+        int remaining = groups.size() - shown;
+
+        html.append("<div class='day-header'>").append(escape(heading)).append("</div>\n");
+        html.append("<table class='status-table'>\n");
+        for (int i = 0; i < shown; i++) {
+            ChangeGroup g = groups.get(i);
+            html.append(changeGroupRow(g));
+            shownIds.add(g.listing().propertyId());
         }
         html.append("</table>\n");
 

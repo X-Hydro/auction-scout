@@ -132,8 +132,8 @@ public class SavedPropertyAlertService {
                 .map(epochMillis -> Instant.ofEpochMilli(epochMillis).atOffset(ZoneOffset.UTC))
                 .orElse(OffsetDateTime.now().minus(FALLBACK_LOOKBACK));
 
-        String html = digestService.renderSavedPropertyAlert(email, propertyIds, since);
-        if (html == null) {
+        DigestService.RenderedDigest rendered = digestService.renderSavedPropertyAlert(email, propertyIds, since);
+        if (rendered == null) {
             // Nothing to report -- no email sent, and deliberately no
             // notification row recorded either, so the next run still
             // looks back to this same "since" cutoff rather than losing
@@ -141,9 +141,9 @@ public class SavedPropertyAlertService {
             return false;
         }
 
-        mailer.send(email, "Updates on your saved properties", html);
+        mailer.send(email, "Updates on your saved properties", rendered.html());
         Integer subscriberId = subscribers.findIdByEmail(email).orElse(null);
-        notifications.recordSent(email, subscriberId, TYPE_SAVED_PROPERTY_ALERT);
+        notifications.recordSent(email, subscriberId, TYPE_SAVED_PROPERTY_ALERT, rendered.shownPropertyIds());
         return true;
     }
 }

@@ -43,6 +43,22 @@ CREATE TABLE IF NOT EXISTS email_notifications (
 CREATE INDEX IF NOT EXISTS idx_email_notifications_email_sent_at
     ON email_notifications(email, sent_at);
 
+-- Which properties were actually shown in a given sent email --
+-- property_id is INTEGER to match properties.property_id in
+-- auctionscout.db (the Python pipeline's source of truth), NOT
+-- saved_properties.property_id here, which is TEXT for unrelated
+-- historical reasons. Backs the property-scoped "was this subscriber
+-- ever shown this specific property" gate NotificationRepository
+-- .hasSentPropertyBefore() uses -- see DigestService.buildChangeGroups().
+CREATE TABLE IF NOT EXISTS email_notification_properties (
+  notification_id INTEGER NOT NULL REFERENCES email_notifications(notification_id),
+  property_id     INTEGER NOT NULL,
+  PRIMARY KEY (notification_id, property_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_email_notification_properties_property
+  ON email_notification_properties(property_id);
+
 -- Stripe redelivers a webhook whenever it doesn't get a clean 2xx back
 -- in time (network blip, slow handler, etc.), even if the first
 -- delivery actually succeeded server-side. This table lets

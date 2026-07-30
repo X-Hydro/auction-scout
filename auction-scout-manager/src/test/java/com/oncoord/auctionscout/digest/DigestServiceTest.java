@@ -23,6 +23,8 @@ import java.time.OffsetDateTime;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -149,17 +151,24 @@ class DigestServiceTest {
     }
 
     /**
-     * Records an email_notifications row with an explicit sent_at,
+     * Records an email_notifications row with an explicit sent_at, plus
+     * a matching email_notification_properties row for propertyId --
      * bypassing NotificationRepository.recordSent() (which always
      * stamps System.currentTimeMillis() -- not usable here, since these
      * tests need sent_at deliberately before or after a specific
      * auction_events.detected_at to exercise DigestService's "was this
-     * subscriber ever emailed before the listing disappeared" gate).
+     * subscriber ever shown this property before it disappeared" gate).
+     * The property-scoped gate (hasSentPropertyBefore) needs the
+     * junction row to exist, not just the notification row itself.
      */
-    private void recordNotificationSentAt(String email, OffsetDateTime sentAt) {
+    private void recordNotificationSentAt(String email, OffsetDateTime sentAt, long propertyId) {
         managerJdbc.update(
                 "INSERT INTO email_notifications (email, notification_type, sent_at) VALUES (?, 'weekly', ?)",
                 email, sentAt.toInstant().toEpochMilli());
+        Long notificationId = managerJdbc.queryForObject("SELECT last_insert_rowid()", Long.class);
+        managerJdbc.update(
+                "INSERT INTO email_notification_properties (notification_id, property_id) VALUES (?, ?)",
+                notificationId, propertyId);
     }
 
 
@@ -181,7 +190,7 @@ class DigestServiceTest {
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
                 false
-        );
+        ).html();
 
         assertTrue(html.contains("42 Elm Street, Nashua, NH"),
                 "expected the property address in the Status Changes section");
@@ -222,7 +231,7 @@ class DigestServiceTest {
                 List.of("MA"),
                 OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
                 false
-        );
+        ).html();
 
         assertFalse(html.contains("10 Maple Ave, Manchester, NH"));
         assertTrue(html.contains("No status changes to report this week."));
@@ -251,7 +260,7 @@ class DigestServiceTest {
                 List.of("NH"),
                 OffsetDateTime.now().minusYears(1), // no events inserted, so this just needs to not matter
                 false
-        );
+        ).html();
 
         assertTrue(html.contains("5 Birch Lane, Concord, NH"),
                 "expected the property address in the Upcoming Auctions section");
@@ -285,7 +294,7 @@ class DigestServiceTest {
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
                 false
-        );
+        ).html();
 
         assertTrue(html.contains("8 Cedar Court, Manchester, NH"));
         assertTrue(html.contains("class='tag'>New<"),
@@ -304,18 +313,18 @@ class DigestServiceTest {
                 .detectedAt("2026-07-14T09:00:00.000000+00:00")
                 .insert();
 
-        // Subscriber received a digest the day before this listing
-        // disappeared -- they had a real chance to see it, so "Removed"
-        // is legitimate information, not noise. See
-        // NotificationRepository.hasSentBefore().
-        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"));
+        // Subscriber received a digest containing this property the day
+        // before it disappeared -- they had a real chance to see it, so
+        // "Removed" is legitimate information, not noise. See
+        // NotificationRepository.hasSentPropertyBefore().
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"), propertyId);
 
         String html = digestService.render(
                 TEST_EMAIL,
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
                 false
-        );
+        ).html();
 
         assertTrue(html.contains("14 Willow Way, Salem, NH"));
         assertTrue(html.contains("class='tag'>Removed<"),
@@ -342,7 +351,7 @@ class DigestServiceTest {
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
                 false
-        );
+        ).html();
 
         // Appeared and vanished within the same digest window -- the
         // subscriber never had a real chance to see it, so it should be
@@ -382,7 +391,7 @@ class DigestServiceTest {
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
                 false
-        );
+        ).html();
 
         assertTrue(html.contains("New Listings"),
                 "a first_seen-only address should render under the New Listings heading");
@@ -403,14 +412,14 @@ class DigestServiceTest {
                 .oldValue("active")
                 .detectedAt("2026-07-14T09:00:00.000000+00:00")
                 .insert();
-        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"));
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"), propertyId);
 
         String html = digestService.render(
                 TEST_EMAIL,
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
                 false
-        );
+        ).html();
 
         assertTrue(html.contains(">Removed<"),
                 "a disappeared-only address should render under the Removed heading");
@@ -438,7 +447,7 @@ class DigestServiceTest {
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
                 false
-        );
+        ).html();
 
         assertTrue(html.contains("Date Changes"),
                 "a date_change-only address should render under the Date Changes heading");
@@ -481,7 +490,7 @@ class DigestServiceTest {
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
                 false
-        );
+        ).html();
 
         assertTrue(html.contains("https://example.com/listing/9001"),
                 "expected a View listing link for a change within the 2-week window");
@@ -511,7 +520,7 @@ class DigestServiceTest {
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
                 false
-        );
+        ).html();
 
         assertTrue(html.contains("500 Elmwood Ave, Keene, NH"),
                 "the row itself should still render -- only the link is gated by the window");
@@ -522,9 +531,10 @@ class DigestServiceTest {
     // ---- Removed gating: notification history --------------------------
     //
     // A listing should only be announced as Removed if this subscriber
-    // actually had a chance to see it -- i.e. some email went out to
-    // them before the removal was detected. See DigestService's
-    // wasRemoved branch and NotificationRepository.hasSentBefore().
+    // actually had a chance to see it -- i.e. this specific property
+    // appeared in something sent to them before the removal was
+    // detected. See DigestService's wasRemoved branch and
+    // NotificationRepository.hasSentPropertyBefore().
 
     @Test
     void render_showsRemoved_whenListingWasIncludedInPriorWeeksEmail() {
@@ -550,14 +560,14 @@ class DigestServiceTest {
                 .insert();
         // "Last week's email" -- sent after the listing was first seen,
         // before it disappeared.
-        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-08T09:00:00+00:00"));
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-08T09:00:00+00:00"), propertyId);
 
         String html = digestService.render(
                 TEST_EMAIL,
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-08T00:00:00+00:00"), // this week's cutoff
                 false
-        );
+        ).html();
 
         assertTrue(html.contains(">Removed<"),
                 "listing was in a prior email and has now disappeared -- should be reported as Removed");
@@ -594,7 +604,7 @@ class DigestServiceTest {
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-08T00:00:00+00:00"),
                 false
-        );
+        ).html();
 
         assertFalse(html.contains("9 Larch Lane, Dover, NH"),
                 "a subscriber never emailed anything never had a chance to see this listing");
@@ -614,14 +624,14 @@ class DigestServiceTest {
                 .insert();
         // Only email on record is AFTER the listing disappeared --
         // doesn't count as "had a chance to see it".
-        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-15T09:00:00+00:00"));
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-15T09:00:00+00:00"), propertyId);
 
         String html = digestService.render(
                 TEST_EMAIL,
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
                 false
-        );
+        ).html();
 
         assertFalse(html.contains("18 Sumac Street, Dover, NH"),
                 "an email sent after the listing disappeared doesn't establish the subscriber ever saw it");
@@ -643,13 +653,13 @@ class DigestServiceTest {
                 .oldValue("active")
                 .detectedAt("2026-07-14T09:00:00.000000+00:00")
                 .insert();
-        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"));
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"), propertyId);
 
         String html = digestService.render(
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
                 false
-        );
+        ).html();
 
         assertFalse(html.contains("27 Tamarack Trail, Dover, NH"),
                 "a bare render() call with no subscriber context must never claim a listing as Removed");
@@ -674,14 +684,14 @@ class DigestServiceTest {
                 .newValue("third party sale")
                 .detectedAt("2026-07-14T09:00:00.000000+00:00")
                 .insert();
-        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"));
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"), propertyId);
 
         String html = digestService.render(
                 TEST_EMAIL,
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
                 false
-        );
+        ).html();
 
         assertTrue(html.contains(">Removed<"),
                 "a terminal status_change value (third party sale) should be treated as Removed");
@@ -701,14 +711,14 @@ class DigestServiceTest {
                 .newValue("canceled") // single-L spelling variant
                 .detectedAt("2026-07-14T09:00:00.000000+00:00")
                 .insert();
-        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"));
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"), propertyId);
 
         String html = digestService.render(
                 TEST_EMAIL,
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
                 false
-        );
+        ).html();
 
         assertTrue(html.contains(">Removed<"),
                 "the terminal-status keyword match is substring-based specifically to catch spelling variants");
@@ -739,7 +749,7 @@ class DigestServiceTest {
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
                 false
-        );
+        ).html();
 
         assertFalse(html.contains("52 Basswood Blvd, Rochester, NH"),
                 "a non-terminal status_change (active) is noise, not something a subscriber needs to act on");
@@ -765,7 +775,7 @@ class DigestServiceTest {
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
                 false
-        );
+        ).html();
 
         assertFalse(html.contains("61 Spruce Circle, Rochester, NH"));
         assertTrue(html.contains("No status changes to report this week."));
@@ -794,7 +804,7 @@ class DigestServiceTest {
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
                 false
-        );
+        ).html();
 
         assertTrue(html.contains("Date Changes"),
                 "a first_seen+date_change combo should be categorized as Date Changes, not New");
@@ -836,7 +846,7 @@ class DigestServiceTest {
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
                 false
-        );
+        ).html();
 
         assertFalse(html.contains("5 Foxglove Lane, Nashua, NH"),
                 "far out and not yet confirmed across the seasoning window -- should not be announced");
@@ -862,7 +872,7 @@ class DigestServiceTest {
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
                 false
-        );
+        ).html();
 
         assertTrue(html.contains("18 Marigold Court, Nashua, NH"),
                 "far out, but already confirmed across the seasoning window -- should announce normally");
@@ -891,7 +901,7 @@ class DigestServiceTest {
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
                 false
-        );
+        ).html();
 
         assertTrue(html.contains("9 Periwinkle Place, Nashua, NH"),
                 "near-term auctions bypass seasoning entirely -- waiting would risk missing the window");
@@ -924,7 +934,7 @@ class DigestServiceTest {
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
                 false
-        );
+        ).html();
 
         assertFalse(html.contains("27 Thistle Way, Nashua, NH"),
                 "an accompanying date_change must not let an unseasoned, far-out listing bypass the gate");
@@ -959,14 +969,14 @@ class DigestServiceTest {
                 .oldValue("active")
                 .detectedAt("2026-07-21T09:00:00.000000+00:00") // inside this week's window
                 .insert();
-        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-15T09:00:00+00:00"));
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-15T09:00:00+00:00"), propertyId);
 
         String html = digestService.render(
                 TEST_EMAIL,
                 List.of("NH"),
                 OffsetDateTime.parse("2026-07-15T00:00:00+00:00"),
                 false
-        );
+        ).html();
 
         assertFalse(html.contains("33 Bramble Ridge, Nashua, NH"),
                 "still unseasoned -- should not surface as Removed even in a later digest window with valid notification history");
@@ -1008,7 +1018,7 @@ class DigestServiceTest {
                 List.of("NH"),
                 OffsetDateTime.now().minusYears(1),
                 false
-        );
+        ).html();
 
         assertTrue(html.contains("77 Windward Lane, Portsmouth, NH"),
                 "a seasoned listing 15 days out should appear in Upcoming Auctions -- "
@@ -1039,10 +1049,192 @@ class DigestServiceTest {
                 List.of("NH"),
                 OffsetDateTime.now().minusYears(1),
                 false
-        );
+        ).html();
 
         assertFalse(html.contains("88 Windward Lane, Portsmouth, NH"),
                 "unseasoned listing 15 days out is still noise -- the gap fix must not bypass seasoning entirely");
+    }
+
+    // ---- Removed gating is property-scoped, not just email-scoped -------
+    //
+    // Regression guard for the fix that replaced NotificationRepository
+    // .hasSentBefore(email, timestamp) (any email ever sent) with
+    // hasSentPropertyBefore(email, propertyId, timestamp) (this specific
+    // property was actually shown before). None of the tests above would
+    // catch a regression back to email-only scoping, since they only ever
+    // record notification history for the one property under test.
+
+    @Test
+    void render_suppressesRemoved_whenSubscriberWasOnlyEmailedAboutADifferentProperty() {
+        // Two separate properties: "other" is what the subscriber was
+        // actually shown; "target" is the one that disappears. A
+        // subscriber with real notification history (just not for this
+        // property) must be treated the same as a subscriber with none.
+        long otherPropertyId = testData.property()
+                .address("1 Other Street, Nashua, NH")
+                .state("NH")
+                .insert();
+        long targetPropertyId = testData.property()
+                .address("2 Target Street, Nashua, NH")
+                .state("NH")
+                .insert();
+        long targetAuctionId = testData.auction(targetPropertyId).insert();
+        testData.event(targetAuctionId, "disappeared")
+                .oldValue("active")
+                .detectedAt("2026-07-14T09:00:00.000000+00:00")
+                .insert();
+
+        // Subscriber was emailed before the disappearance -- but that
+        // email only ever showed the OTHER property, never the target.
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"), otherPropertyId);
+
+        String html = digestService.render(
+                TEST_EMAIL,
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        ).html();
+
+        assertFalse(html.contains("2 Target Street, Nashua, NH"),
+                "subscriber was emailed about a different property -- that shouldn't unlock Removed for this one");
+        assertTrue(html.contains("No status changes to report this week."));
+    }
+
+    // ---- renderSavedPropertyAlert() ---------------------------------
+    //
+    // Previously untested in this file -- render() coverage above never
+    // exercises this method or its backing query,
+    // findRecentChangesForProperties(). Covers the date_change/Removed
+    // path, its own property-scoped Removed gate, and the status_change
+    // broadening (terminal -> Removed, non-terminal -> excluded, same
+    // as the weekly digest's isRemovalEvent()/isNoiseStatusChange()).
+
+    @Test
+    void renderSavedPropertyAlert_includesDateChange_andTracksShownPropertyId() {
+        long propertyId = testData.property()
+                .address("10 Saved Street, Nashua, NH")
+                .state("NH")
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .auctionDatetime("2026-08-01T10:00:00")
+                .insert();
+        testData.event(auctionId, "date_change")
+                .oldValue("2026-07-25T10:00:00")
+                .newValue("2026-08-01T10:00:00")
+                .detectedAt("2026-07-14T09:00:00.000000+00:00")
+                .insert();
+
+        DigestService.RenderedDigest rendered = digestService.renderSavedPropertyAlert(
+                TEST_EMAIL, List.of(propertyId), OffsetDateTime.parse("2026-07-01T00:00:00+00:00"));
+
+        assertNotNull(rendered, "a qualifying date_change should produce a real alert, not null");
+        assertTrue(rendered.html().contains("10 Saved Street, Nashua, NH"));
+        assertTrue(rendered.html().contains("2026-07-25 → 2026-08-01"));
+        assertTrue(rendered.shownPropertyIds().contains(propertyId),
+                "the property should be recorded as shown, for the property-scoped Removed gate to use later");
+    }
+
+    @Test
+    void renderSavedPropertyAlert_returnsNull_whenNoQualifyingChanges() {
+        long propertyId = testData.property()
+                .address("11 Quiet Street, Nashua, NH")
+                .state("NH")
+                .insert();
+        testData.auction(propertyId).insert();
+        // No events at all -- nothing for the alert to report.
+
+        DigestService.RenderedDigest rendered = digestService.renderSavedPropertyAlert(
+                TEST_EMAIL, List.of(propertyId), OffsetDateTime.parse("2026-07-01T00:00:00+00:00"));
+
+        assertNull(rendered, "no qualifying changes -- caller should skip sending and skip recording a notification");
+    }
+
+    @Test
+    void renderSavedPropertyAlert_showsRemoved_whenSubscriberWasPreviouslyShownThisProperty() {
+        long propertyId = testData.property()
+                .address("12 Gated Street, Nashua, NH")
+                .state("NH")
+                .insert();
+        long auctionId = testData.auction(propertyId).insert();
+        testData.event(auctionId, "disappeared")
+                .oldValue("active")
+                .detectedAt("2026-07-14T09:00:00.000000+00:00")
+                .insert();
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"), propertyId);
+
+        DigestService.RenderedDigest rendered = digestService.renderSavedPropertyAlert(
+                TEST_EMAIL, List.of(propertyId), OffsetDateTime.parse("2026-07-01T00:00:00+00:00"));
+
+        assertNotNull(rendered);
+        assertTrue(rendered.html().contains("12 Gated Street, Nashua, NH"));
+    }
+
+    @Test
+    void renderSavedPropertyAlert_suppressesRemoved_whenSubscriberWasShownADifferentProperty() {
+        long otherPropertyId = testData.property()
+                .address("13 Other Street, Nashua, NH")
+                .state("NH")
+                .insert();
+        long targetPropertyId = testData.property()
+                .address("14 Target Street, Nashua, NH")
+                .state("NH")
+                .insert();
+        long targetAuctionId = testData.auction(targetPropertyId).insert();
+        testData.event(targetAuctionId, "disappeared")
+                .oldValue("active")
+                .detectedAt("2026-07-14T09:00:00.000000+00:00")
+                .insert();
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"), otherPropertyId);
+
+        DigestService.RenderedDigest rendered = digestService.renderSavedPropertyAlert(
+                TEST_EMAIL, List.of(targetPropertyId), OffsetDateTime.parse("2026-07-01T00:00:00+00:00"));
+
+        assertNull(rendered,
+                "subscriber was previously shown a different property, not this one -- Removed should stay suppressed");
+    }
+
+    @Test
+    void renderSavedPropertyAlert_treatsTerminalStatusChange_asRemoved() {
+        // findRecentChangesForProperties() was broadened to include
+        // status_change (not just the structural 'disappeared' event) --
+        // a saved property cancelled/sold via a status update should
+        // surface here too, matching the weekly digest's behavior.
+        long propertyId = testData.property()
+                .address("15 Cancelled Street, Nashua, NH")
+                .state("NH")
+                .insert();
+        long auctionId = testData.auction(propertyId).insert();
+        testData.event(auctionId, "status_change")
+                .oldValue("active")
+                .newValue("third party sale")
+                .detectedAt("2026-07-14T09:00:00.000000+00:00")
+                .insert();
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"), propertyId);
+
+        DigestService.RenderedDigest rendered = digestService.renderSavedPropertyAlert(
+                TEST_EMAIL, List.of(propertyId), OffsetDateTime.parse("2026-07-01T00:00:00+00:00"));
+
+        assertNotNull(rendered, "a terminal status_change (third party sale) should now surface as Removed");
+        assertTrue(rendered.html().contains("15 Cancelled Street, Nashua, NH"));
+    }
+
+    @Test
+    void renderSavedPropertyAlert_excludesNonTerminalStatusChange() {
+        long propertyId = testData.property()
+                .address("16 Active Street, Nashua, NH")
+                .state("NH")
+                .insert();
+        long auctionId = testData.auction(propertyId).insert();
+        testData.event(auctionId, "status_change")
+                .oldValue("postponed")
+                .newValue("active")
+                .detectedAt("2026-07-14T09:00:00.000000+00:00")
+                .insert();
+
+        DigestService.RenderedDigest rendered = digestService.renderSavedPropertyAlert(
+                TEST_EMAIL, List.of(propertyId), OffsetDateTime.parse("2026-07-01T00:00:00+00:00"));
+
+        assertNull(rendered, "a non-terminal status_change is noise, same as the weekly digest's handling");
     }
 
 }

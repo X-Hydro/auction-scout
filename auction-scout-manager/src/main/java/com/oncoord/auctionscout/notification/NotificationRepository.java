@@ -1,9 +1,14 @@
 package com.oncoord.auctionscout.notification;
 
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.support.GeneratedKeyHolder;
+import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.stereotype.Repository;
 
+import java.sql.PreparedStatement;
+import java.sql.Statement;
 import java.time.Duration;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -77,18 +82,24 @@ public class NotificationRepository {
     }
 
     /**
-     * Whether this email received ANY notification (regardless of
-     * type) strictly before the given point in time. Used to gate
-     * whether a subscriber can be told a listing was "Removed" — if
-     * nothing went out to them before the listing disappeared, they
-     * never had a chance to see it in the first place, so announcing
-     * its removal would be telling them about something they never
-     * knew existed. See DigestService.renderChanges().
+     * Whether this specific property was actually shown to this email
+     * in some past notification, strictly before the given point in
+     * time. Used to gate whether a subscriber can be told a listing was
+     * "Removed" — if this property never appeared in anything sent to
+     * them before it disappeared, they never had a chance to see it in
+     * the first place, so announcing its removal would be telling them
+     * about something they never knew existed. Property-scoped (via
+     * email_notification_properties) rather than "was ANY email ever
+     * sent to them" -- a subscriber who's received other digests but
+     * never one containing this property shouldn't pass this gate for
+     * it. See DigestService.buildChangeGroups().
      */
-    public boolean hasSentBefore(String email, long beforeEpochMillis) {
+    public boolean hasSentPropertyBefore(String email, long propertyId, long beforeEpochMillis) {
         Integer count = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM email_notifications WHERE email = ? AND sent_at < ?",
-                Integer.class, email, beforeEpochMillis
+                "SELECT COUNT(*) FROM email_notification_properties enp " +
+                        "JOIN email_notifications en ON en.notification_id = enp.notification_id " +
+                        "WHERE en.email = ? AND enp.property_id = ? AND en.sent_at < ?",
+                Integer.class, email, propertyId, beforeEpochMillis
         );
         return count != null && count > 0;
     }
@@ -106,11 +117,41 @@ public class NotificationRepository {
         return count != null ? count : 0;
     }
 
-    public void recordSent(String email, Integer subscriberId, String notificationType) {
-        jdbc.update(
-                "INSERT INTO email_notifications (subscriber_id, email, notification_type, sent_at) " +
-                        "VALUES (?, ?, ?, ?)",
-                subscriberId, email, notificationType, System.currentTimeMillis()
-        );
+    /**
+     * @param shownPropertyIds every property actually shown in the sent
+     *                         email, recorded alongside it in
+     *                         email_notification_properties so a later
+     *                         Removed-gate check can be property-scoped
+     *                         (see hasSentPropertyBefore()). Empty for
+     *                         a notification type with no property
+     *                         content (e.g. welcome, though today's
+     *                         callers pass it consistently either way).
+     */
+    public void recordSent(String email, Integer subscriberId, String notificationType, List<Long> shownPropertyIds) {
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbc.update(connection -> {
+            PreparedStatement ps = connection.prepareStatement(
+                    "INSERT INTO email_notifications (subscriber_id, email, notification_type, sent_at) " +
+                            "VALUES (?, ?, ?, ?)",
+                    Statement.RETURN_GENERATED_KEYS);
+            ps.setObject(1, subscriberId);
+            ps.setString(2, email);
+            ps.setString(3, notificationType);
+            ps.setLong(4, System.currentTimeMillis());
+            return ps;
+        }, keyHolder);
+
+        if (shownPropertyIds.isEmpty()) {
+            return;
+        }
+        long notificationId = keyHolder.getKey().longValue();
+        jdbc.batchUpdate(
+                "INSERT INTO email_notification_properties (notification_id, property_id) VALUES (?, ?)",
+                shownPropertyIds,
+                shownPropertyIds.size(),
+                (ps, propertyId) -> {
+                    ps.setLong(1, notificationId);
+                    ps.setLong(2, propertyId);
+                });
     }
 }

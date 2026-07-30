@@ -60,7 +60,7 @@ public class StatusController {
         // 7-day cutoff, same placeholder reasoning as before: real
         // per-subscriber "last digest sent" tracking is scheduling work,
         // not built yet.
-        String html = digestService.renderForSubscriber(email.get(), OffsetDateTime.now().minusDays(7), false);
+        String html = digestService.renderForSubscriber(email.get(), OffsetDateTime.now().minusDays(7), false).html();
         return ResponseEntity.ok(html);
     }
 

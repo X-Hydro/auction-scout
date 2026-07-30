@@ -272,12 +272,18 @@ public class PropertyDigestRepository {
     /**
      * Same shape as findRecentChanges, but scoped to an explicit list of
      * property IDs rather than states, and restricted to
-     * date_change/disappeared events only -- backs the daily
+     * date_change/disappeared/status_change events -- backs the daily
      * saved-property alert (date changes and removals), not the full
-     * New/Status-Changes/Removed set the weekly digest covers. No
-     * property_duplicate_links exclusion here either, matching
-     * findById()'s reasoning: a saved property should surface its
-     * changes regardless of duplicate-link status.
+     * New/Status-Changes/Removed set the weekly digest covers.
+     * status_change is included (not just the structural 'disappeared'
+     * event) so a saved property that goes terminal via a status update
+     * (cancelled/sold/third-party sale) surfaces as a removal here too --
+     * DigestService.buildChangeGroups() already reclassifies a terminal
+     * status_change as "Removed" and silently drops a non-terminal one
+     * as noise, the same as it does for the weekly digest, so no extra
+     * filtering is needed here. No property_duplicate_links exclusion
+     * either, matching findById()'s reasoning: a saved property should
+     * surface its changes regardless of duplicate-link status.
      */
     public List<ChangedListing> findRecentChangesForProperties(List<Long> propertyIds, OffsetDateTime since) {
         if (propertyIds.isEmpty()) {
@@ -294,7 +300,7 @@ public class PropertyDigestRepository {
                 JOIN properties p ON p.property_id = a.property_id
                 WHERE e.detected_at >= ?
                   AND p.property_id IN (%s)
-                  AND e.event_type IN ('date_change', 'disappeared')
+                  AND e.event_type IN ('date_change', 'disappeared', 'status_change')
                 ORDER BY e.detected_at DESC
                 """.formatted(placeholders);
 
