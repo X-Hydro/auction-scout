@@ -28,7 +28,8 @@ public class WeeklyDigestScheduler {
         this.digestSendService = digestSendService;
     }
 
-    @Scheduled(cron = "0 0 9 * * MON", zone = "America/New_York")
+    //@Scheduled(cron = "0 0 9 * * MON", zone = "America/New_York")
+    @Scheduled(cron = Scheduled.CRON_DISABLED, zone = "America/New_York")
     public void sendWeeklyDigests() {
         digestSendService.sendWeeklyToAllActiveSubscribers();
     }
