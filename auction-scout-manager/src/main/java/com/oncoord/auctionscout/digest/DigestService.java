@@ -49,6 +49,12 @@ public class DigestService {
     // within this many days — nothing to act on for one months out.
     private static final int NEW_LISTING_LINK_WINDOW_DAYS = 21;
 
+    // How long a digest's "view all" links stay live without a login
+    // step. Matches the weekly send cadence -- a link should still work
+    // if someone opens last week's email a few days late. Must match
+    // the TTL StatusController checks this same token against.
+    private static final long VIEW_TOKEN_TTL_MILLIS = 7L * 24 * 60 * 60 * 1000;
+
     // See filterActiveListings() for how these two combine.
     private static final int ACTIVE_LISTING_CAP_DAYS = 30;
     private static final int URGENCY_WAIVER_DAYS = 7;
@@ -117,6 +123,9 @@ public class DigestService {
      * param's value, so post-login.html gets it back intact.
      */
     private String buildAutoLoginLink(String email, String redirectPath) {
+        // Must match VerifyController's normalization exactly -- tokens
+        // are matched by exact subject string, so a mismatch here makes
+        // every link "invalid or expired" even though it's brand new.
         String normalizedEmail = email.trim().toLowerCase();
         String rawToken = tokenService.issue(normalizedEmail);
         return appBaseUrl + "/auction-scout/post-login.html#email="
@@ -155,6 +164,12 @@ public class DigestService {
         List<UpcomingListing> upcoming = filterActiveListings(repository.findActive(states, now));
         List<ChangedListing> changes = repository.findRecentChanges(states, changesSince);
 
+        // Only mint a view token for a real send (truncate=true, real
+        // recipient email) -- the dead /status page (truncate=false)
+        // already has its own session, same reasoning as
+        // buildPreferencesLink's truncate check just above.
+        String viewToken = (email != null && truncate) ? tokenService.issue(email) : null;
+
         return """
                 <html><head><base target="_top"><style>
                     body { font-family: -apple-system, Helvetica, Arial, sans-serif; color: #1a1a1a; margin:0; padding:0; background:#f4f4f4; }
@@ -188,8 +203,8 @@ public class DigestService {
                 </div></body></html>
                 """.formatted(
                 now.format(DateTimeFormatter.ofPattern("MMMM d, yyyy", Locale.US)),
-                renderUpcoming(upcoming, truncate, statusUrl(states)),
-                renderChanges(buildChangeGroups(changes, email, true), truncate, statusUrl(states)),
+                renderUpcoming(upcoming, truncate, statusUrl(states, viewToken)),
+                renderChanges(buildChangeGroups(changes, email, true), truncate, statusUrl(states, viewToken)),
                 PREFERENCES_LINK_PLACEHOLDER,
                 PREFERENCES_LINK_PLACEHOLDER
         );
@@ -263,19 +278,13 @@ public class DigestService {
         }
 
         String preferencesLink = buildPreferencesLink(email);
-        // Auto-login, not a bare statusUrl() link -- status.html's
-        // multi-state view requires a session token to know this is a
-        // real subscriber with an active subscription, not an
-        // anonymous visitor capped to one state. A plain link here
-        // would land them on the "Upgrade to view multiple states"
-        // page despite already being one, which is exactly wrong for a
-        // subscriber-only email like this one (unlike the weekly
-        // digest's "view all" links, which are meant to also work as
-        // bare, sharable URLs -- see statusUrl()'s own doc comment).
-        String statesParam = String.join(",", subscribers.getStates(email));
-        String statusRedirectPath = "/auction-scout/status.html?states="
-                + URLEncoder.encode(statesParam, StandardCharsets.UTF_8);
-        String dashboardLink = buildAutoLoginLink(email, statusRedirectPath);
+        // statusUrl()'s view token now carries the same entitlement
+        // proof buildAutoLoginLink used to need a full login for --
+        // status.html resolves it server-side to this subscriber's
+        // real state count instead of capping at the free tier. Unlike
+        // the old post-login.html hop, this is non-consuming, so it
+        // still works if the subscriber opens this email more than once.
+        String dashboardLink = statusUrl(subscribers.getStates(email), tokenService.issue(email));
         return """
                 <html><head><base target="_top"><style>
                     body { font-family: -apple-system, Helvetica, Arial, sans-serif; color: #1a1a1a; margin:0; padding:0; background:#f4f4f4; }
@@ -298,17 +307,26 @@ public class DigestService {
                 <p style='margin-top:16px;'><a href='%s'>View on your AuctionScout dashboard →</a></p>
                 </div>
                 <div class='footer'>You're receiving this because one or more of your saved properties changed. <a href='%s'>Manage preferences</a>
-                <p style='margin-top:8px;font-size:13px;color:#666;'>The links above sign you in automatically and each works once. If a link's already been used, just log in normally from the <a href='%s'>AuctionScout</a> login page.</p>
+                <p style='margin-top:8px;font-size:13px;color:#666;'>Your dashboard link above works without logging in. The preferences link signs you in automatically and works once -- if it's already been used, just log in normally from the <a href='%s'>AuctionScout</a> login page.</p>
                 </div>
                 </div></body></html>
                 """.formatted(sections.toString(), dashboardLink, preferencesLink, appBaseUrl + "/auction-scout/register.html");
     }
 
-    /** status.html and the map are unauthenticated -- states aren't sensitive, so this is a plain, bookmarkable URL. */
-    private String statusUrl(List<String> states) {
+    /**
+     * States are still public -- this stays a plain, bookmarkable URL
+     * with no token if viewToken is null (anonymous callers, tests).
+     * When present, viewToken carries no email/PII in the URL itself;
+     * it's an opaque, unguessable pointer StatusController resolves
+     * server-side via TokenService.peek(token, ttl) to grant the
+     * subscriber's real entitlement (state count above the free cap)
+     * without a login step.
+     */
+    private String statusUrl(List<String> states, String viewToken) {
         String stateParam = String.join(",", states);
-        return appBaseUrl + "/auction-scout/status.html?states="
+        String url = appBaseUrl + "/auction-scout/status.html?states="
                 + URLEncoder.encode(stateParam, StandardCharsets.UTF_8);
+        return viewToken == null ? url : url + "&vt=" + URLEncoder.encode(viewToken, StandardCharsets.UTF_8);
     }
 
     private String renderUpcoming(List<UpcomingListing> upcoming, boolean truncate, String viewAllLinkHref) {
