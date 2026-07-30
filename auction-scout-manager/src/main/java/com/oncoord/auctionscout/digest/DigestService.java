@@ -519,16 +519,22 @@ public class DigestService {
     /**
      * The eligibility rule for "Upcoming Auctions" (email and status
      * page both use this): dateless listings are always suppressed;
-     * nothing beyond ACTIVE_LISTING_CAP_DAYS out is shown regardless of
-     * seasoning (too likely to be postponed before it matters); inside
-     * that cap, seasoning is required unless the auction is within
-     * URGENCY_WAIVER_DAYS, in which case it's shown regardless -- better
-     * a little noise than missing something happening soon.
+     * a terminal-status listing (cancel/sold/third-party -- see
+     * isTerminalStatus(), same check the Changes pipeline already uses)
+     * is suppressed regardless of its date, since a stale future
+     * auction_datetime on a cancelled listing is exactly the case this
+     * exists to catch; nothing beyond ACTIVE_LISTING_CAP_DAYS out is
+     * shown regardless of seasoning (too likely to be postponed before
+     * it matters); inside that cap, seasoning is required unless the
+     * auction is within URGENCY_WAIVER_DAYS, in which case it's shown
+     * regardless -- better a little noise than missing something
+     * happening soon.
      */
     private List<UpcomingListing> filterActiveListings(List<UpcomingListing> listings) {
         LocalDateTime now = LocalDateTime.now();
         return listings.stream()
                 .filter(l -> l.auctionDateTime() != null)
+                .filter(l -> !isTerminalStatus(l.status()))
                 .filter(l -> l.auctionDateTime().isBefore(now.plusDays(ACTIVE_LISTING_CAP_DAYS)))
                 .filter(l -> isSeasoned(l.auctionDateTime(), l.firstSeenAt(), l.lastSeenAt())
                         || l.auctionDateTime().isBefore(now.plusDays(URGENCY_WAIVER_DAYS)))

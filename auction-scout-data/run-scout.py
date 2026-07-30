@@ -26,6 +26,8 @@ from spiders.jjmanning import JJManningSpider
 from spiders.towne import TowneAuctionSpider
 from spiders.patriot import PatriotSpider
 from spiders.skypoint import SkypointSpider
+from spiders.landmark import LandmarkSpider
+
 from base import DEFAULT_OVERRIDES_PATH
 from geocode import reverse_geocode_geography, geocode_with_fallbacks
 
@@ -39,6 +41,7 @@ REGISTRY = {
     "towne": TowneAuctionSpider,
     "patriot": PatriotSpider,
     "skypoint": SkypointSpider,
+    "landmark": LandmarkSpider,
 }
 
 # Spiders that exist as a stub but are intentionally not runnable yet
@@ -91,6 +94,128 @@ def resolve_spiders(names):
 # never anchoring to start avoids false-matching 2-letter fragments earlier
 # in a messier city name.
 STATE_RE = re.compile(r"\b([A-Z]{2})(?:\s+\d{5}(?:-\d{4})?)?\s*$")
+
+
+# ---- cross-source dedup ------------------------------------------------
+#
+# Confirmed 2026-07-30: Landmark Auction Co. (the auction house) and
+# Brock & Scott (the law firm) list many of the same MA/NH/RI/VT
+# foreclosures -- same property, two different spiders, two different
+# ids, no relationship between the rows anywhere in the pipeline. Without
+# this step they'd show up as two separate markers on the map. Landmark's
+# listing has photos and clearer status/date detail, so it wins whenever
+# both sources have a row for the same address.
+#
+# Deliberately scoped to ONLY this confirmed pair (see DEDUP_SOURCE_PRIORITY)
+# rather than deduping any two sources that happen to produce the same
+# normalized address -- an unconfirmed collision between two OTHER sources
+# is more likely a coincidence (or a real bug worth seeing) than an actual
+# duplicate, and silently dropping a real listing is worse than showing an
+# extra marker. Same "explicit, visible exception" philosophy as
+# harmon.py's respect_robots override -- this isn't a blanket assumption
+# that any two sources overlap.
+DEDUP_SOURCE_PRIORITY = {
+    frozenset({"landmark", "brockscott"}): ["landmark", "brockscott"],
+}
+
+# Common street-type words that show up spelled out on one site and
+# abbreviated on the other (e.g. Landmark's "128 North Street" vs Brock &
+# Scott's own formatting choices) -- normalized to a single form so
+# matching doesn't depend on which spelling a given source happened to use.
+_STREET_ABBR = {
+    "STREET": "ST", "DRIVE": "DR", "ROAD": "RD", "AVENUE": "AVE",
+    "LANE": "LN", "TERRACE": "TER", "CIRCLE": "CIR", "COURT": "CT",
+    "PLACE": "PL", "BOULEVARD": "BLVD", "PARKWAY": "PKWY", "SQUARE": "SQ",
+    "TRAIL": "TRL", "EXTENSION": "EXT", "HIGHWAY": "HWY",
+    "NORTH": "N", "SOUTH": "S", "EAST": "E", "WEST": "W",
+}
+_UNIT_RE = re.compile(r"\b(?:UNIT|APT|#)\s*([A-Z0-9-]+)\b", re.IGNORECASE)
+_ZIP_RE = re.compile(r"(\d{5})(?:-\d{4})?\s*$")
+
+
+def _normalize_street(street):
+    """Uppercase, strip punctuation, and normalize common street-type/
+    directional words so '128 North Street' and '128 North St' (or
+    'N St') compare equal. Only compares against the FIRST name when a
+    Landmark title has an 'a/k/a' alias -- Brock & Scott's addresses never
+    carry one, so that's the only name it could ever match against."""
+    if not street:
+        return ""
+    s = street.split(" a/k/a ")[0]
+    s = re.sub(r"[.,]", "", s).upper().strip()
+    s = re.sub(r"\s+", " ", s)
+    for full, abbr in _STREET_ABBR.items():
+        s = re.sub(rf"\b{full}\b", abbr, s)
+    # Unit/apt info is compared separately (see _dedup_key) -- strip it
+    # out here so "128 North St" and "128 North St Unit 4" still match on
+    # the base street.
+    s = _UNIT_RE.sub("", s).strip()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def _dedup_key(row):
+    """(zip, normalized street, unit) -- unit is kept as a SEPARATE part
+    of the key (not folded into the street) specifically so two different
+    units in the same building (e.g. '111 Foster St Unit 510' and
+    'Unit 302') are never treated as duplicates of each other; only an
+    exact street+unit+zip match collapses two rows."""
+    zip_match = _ZIP_RE.search(row.get("city_state", "") or "")
+    zip_code = zip_match.group(1) if zip_match else ""
+    unit_match = _UNIT_RE.search(row.get("street", "") or "")
+    unit = unit_match.group(1).upper() if unit_match else ""
+    return zip_code, _normalize_street(row.get("street", "")), unit
+
+
+def dedup_cross_source(rows):
+    """
+    Collapse rows that represent the same physical auction listed on more
+    than one confirmed-overlapping source (see DEDUP_SOURCE_PRIORITY),
+    keeping only the highest-priority source's row. Rows that can't be
+    matched confidently (no zip found) or whose sources aren't a known
+    overlapping pair are left alone -- better an extra marker than a
+    silently dropped real listing.
+    """
+    keyed = {}
+    unkeyable = []
+    for row in rows:
+        zip_code, street_norm, unit = _dedup_key(row)
+        if not zip_code or not street_norm:
+            unkeyable.append(row)
+            continue
+        keyed.setdefault((zip_code, street_norm, unit), []).append(row)
+
+    kept = list(unkeyable)
+    dropped = []
+    for group in keyed.values():
+        if len(group) == 1:
+            kept.append(group[0])
+            continue
+
+        sources_present = {r["source"] for r in group}
+        priority = next(
+            (order for pair, order in DEDUP_SOURCE_PRIORITY.items()
+             if sources_present <= pair),
+            None,
+        )
+        if priority is None:
+            # Same normalized address, but not a pair we've confirmed
+            # overlaps -- don't guess, keep every row.
+            kept.extend(group)
+            continue
+
+        group.sort(key=lambda r: priority.index(r["source"]))
+        kept.append(group[0])
+        dropped.extend((group[0], loser) for loser in group[1:])
+
+    if dropped:
+        print(f"Cross-source dedup: dropped {len(dropped)} duplicate row(s):")
+        for winner, loser in dropped:
+            print(f"  kept [{winner['source']}:{winner['id']}] over "
+                  f"[{loser['source']}:{loser['id']}] -- "
+                  f"{winner.get('street', '')}, {winner.get('city_state', '')}")
+
+    return kept
 
 def format_row(row):
 
@@ -162,6 +287,8 @@ def main():
         rows = spider.scrape()
         print(f"[{spider.name}] {len(rows)} auctions after dedupe/status filter")
         all_rows.extend(rows)
+
+    all_rows = dedup_cross_source(all_rows)
 
     print("Geocoding addresses...")
     address_pairs = [

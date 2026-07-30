@@ -36,7 +36,7 @@ public class PropertyDigestRepository {
 
     public record UpcomingListing(
             long propertyId, String address, String state, Double latitude, Double longitude,
-            String sourceUrl, LocalDateTime auctionDateTime,
+            String sourceUrl, LocalDateTime auctionDateTime, String status,
             OffsetDateTime firstSeenAt, OffsetDateTime lastSeenAt) {}
 
     public record ChangedListing(
@@ -85,7 +85,7 @@ public class PropertyDigestRepository {
 
         String sql = """
                 SELECT p.property_id, p.address_raw, p.state, p.latitude, p.longitude,
-                       a.source_url, a.auction_datetime, p.first_seen_at, p.last_seen_at
+                       a.source_url, a.auction_datetime, a.status, p.first_seen_at, p.last_seen_at
                 FROM auctions a
                 JOIN properties p ON p.property_id = a.property_id
                 WHERE a.auction_datetime BETWEEN ? AND ?
@@ -115,6 +115,7 @@ public class PropertyDigestRepository {
                 (Double) rs.getObject("longitude"),
                 rs.getString("source_url"),
                 parseLocal(rs.getString("auction_datetime")),
+                rs.getString("status"),
                 parseOffset(rs.getString("first_seen_at")),
                 parseOffset(rs.getString("last_seen_at"))
         ), args);
@@ -136,7 +137,7 @@ public class PropertyDigestRepository {
 
         String sql = """
                 SELECT p.property_id, p.address_raw, p.state, p.latitude, p.longitude,
-                       a.source_url, a.auction_datetime, p.first_seen_at, p.last_seen_at
+                       a.source_url, a.auction_datetime, a.status, p.first_seen_at, p.last_seen_at
                 FROM auctions a
                 JOIN properties p ON p.property_id = a.property_id
                 WHERE a.auction_datetime >= ?
@@ -166,6 +167,7 @@ public class PropertyDigestRepository {
                 (Double) rs.getObject("longitude"),
                 rs.getString("source_url"),
                 parseLocal(rs.getString("auction_datetime")),
+                rs.getString("status"),
                 parseOffset(rs.getString("first_seen_at")),
                 parseOffset(rs.getString("last_seen_at"))
         ), args);
