@@ -65,10 +65,11 @@ public class DigestService {
     private static final List<String> TERMINAL_STATUS_KEYWORDS =
             List.of("cancel", "sold", "third party", "3rd party");
 
-    // status.html and the map are unauthenticated -- states are public,
-    // so their links are built directly. preferences.html still needs a
-    // session, so its link is the only one built via a magic-link token
-    // (only renderForSubscriber() has an email to mint one for).
+    // status.html/map links are still built directly (states are public,
+    // no login required) but now carry a reusable view token proving
+    // entitlement (see statusUrl()) -- a read-only mechanism, distinct
+    // from preferences.html's link below, which needs a real one-time
+    // login token since it's a write surface (see buildAutoLoginLink()).
     private static final String PREFERENCES_LINK_PLACEHOLDER = "{{PREFERENCES_LINK}}";
 
     private final PropertyDigestRepository repository;
@@ -107,20 +108,21 @@ public class DigestService {
         return html.replace(PREFERENCES_LINK_PLACEHOLDER, preferencesLink);
     }
 
-    /** Issues a magic-link token to post-login.html, redirecting to preferences.html. */
+    /** Issues a one-time token to post-login.html, redirecting to preferences.html. */
     private String buildPreferencesLink(String email) {
         return buildAutoLoginLink(email, "/auction-scout/preferences.html");
     }
 
     /**
-     * Issues a magic-link token to post-login.html, redirecting to an
-     * arbitrary path once authenticated -- generalized out of
-     * buildPreferencesLink() so other subscriber-only email links (e.g.
-     * the saved-property alert's dashboard link) can use the same
-     * pattern instead of a bare, unauthenticated URL. redirectPath may
-     * include its own query string (e.g. "/auction-scout/status.html
-     * ?states=NH,RI") -- it's encoded whole as the outer redirect
-     * param's value, so post-login.html gets it back intact.
+     * Issues a one-time token to post-login.html, redirecting
+     * to an arbitrary path once authenticated. Currently only
+     * buildPreferencesLink() calls this -- kept as a general
+     * redirectPath parameter rather than hardcoded to preferences.html
+     * so any future write-surface email link (something that, unlike
+     * status.html, needs a real session rather than a reusable view
+     * token) can reuse it as-is. redirectPath may include its own query
+     * string -- it's encoded whole as the outer redirect param's value,
+     * so post-login.html gets it back intact.
      */
     private String buildAutoLoginLink(String email, String redirectPath) {
         // Must match VerifyController's normalization exactly -- tokens

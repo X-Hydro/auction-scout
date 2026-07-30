@@ -14,11 +14,6 @@ import java.util.Map;
 @RestController
 public class RegisterController {
 
-    // Single implicit purpose (per decision: this table has no purpose
-    // column, so every token issued from AuctionScoutTokenStore is scoped
-    // by this constant rather than by a persisted column).
-    private static final String PURPOSE = "auctionscout";
-
     private final RecaptchaClient recaptchaClient;
     private final TokenService tokenService;
     private final SubscriberRepository subscribers;

@@ -14,7 +14,6 @@ import java.util.Optional;
 @RestController
 public class VerifyController {
 
-    private static final String PURPOSE = "auctionscout";
     private static final long TOKEN_TTL_MILLIS = 30L * 60 * 1000; // 30 minutes
 
     private final TokenService tokenService;
