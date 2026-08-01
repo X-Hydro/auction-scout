@@ -3,7 +3,11 @@ package com.oncoord.auctionscout.digest;
 import com.oncoord.auctionscout.notification.NotificationRepository;
 import com.oncoord.auctionscout.properties.PropertiesDbConnectionManager;
 import com.oncoord.auctionscout.properties.PropertyDigestRepository;
+import com.oncoord.auctionscout.subscriber.SubscriberRepository;
 import com.oncoord.auctionscout.testsupport.PropertyDigestTestData;
+import com.oncoord.auth.common.TokenRecord;
+import com.oncoord.auth.common.TokenService;
+import com.oncoord.auth.common.TokenStore;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -20,9 +24,14 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -42,9 +51,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * (the auth/login db AuctionScoutTokenStoreTest uses); the two are
  * unrelated on disk and just happen to sit in sibling directories.
  *
- * DigestService.render() never touches SubscriberRepository (only
- * renderForSubscriber() does), so it's safe to pass null for that
- * dependency here rather than mock it.
+ * DigestService.render() never touches SubscriberRepository or
+ * TokenService directly, but renderSavedPropertyAlert() does, via
+ * wrapSavedPropertyAlert()'s dashboard link -- so both are real here,
+ * not mocked: SubscriberRepository backed by this test's own
+ * managerJdbc (same JdbcTemplate NotificationRepository uses), and
+ * TokenService backed by a small InMemoryTokenStore fake (see
+ * TokenServiceSmokeTest in oncoord-auth-common for the same pattern),
+ * since TokenService is a third-party library class this test can't
+ * back with its own JdbcTemplate.
  *
  * Each test's database file lands in src/test/db/, named after this
  * class, and is NOT deleted after the run -- intentionally, so it can
@@ -120,12 +135,49 @@ class DigestServiceTest {
         testData = new PropertyDigestTestData(jdbc);
         PropertyDigestRepository repository = new PropertyDigestRepository(dbManager);
         NotificationRepository notifications = new NotificationRepository(managerJdbc);
-        // null for both SubscriberRepository and TokenService: render()
-        // (the only method every test here calls) touches neither --
-        // only renderForSubscriber() does, for the email auto-login
-        // links. Same reasoning as the existing SubscriberRepository
-        // null, just now applying to the newer TokenService param too.
-        digestService = new DigestService(repository, null, notifications, null, "https://oncoord.com");
+        // Both SubscriberRepository and TokenService turned out to be
+        // needed by more than just renderForSubscriber(): wrapSavedPropertyAlert()
+        // (used by renderSavedPropertyAlert()) calls subscribers.getStates(email)
+        // AND tokenService.issue(email) directly, to build the "View on
+        // your dashboard" link -- regardless of which top-level method
+        // the individual test calls. SubscriberRepository is real
+        // (plain JdbcTemplate, same shape as NotificationRepository) --
+        // getStates() just returns an empty list for an email with no
+        // subscribers/subscriber_states rows, so no fixture data is
+        // needed for tests that don't care about the dashboard link
+        // contents. TokenService needs an InMemoryTokenStore fake
+        // instead (same pattern TokenServiceSmokeTest uses in
+        // oncoord-auth-common) since it's a third-party library class,
+        // not something backed by this test's own JdbcTemplate.
+        SubscriberRepository subscribers = new SubscriberRepository(managerJdbc);
+        digestService = new DigestService(repository, subscribers, notifications, new TokenService(new InMemoryTokenStore()), "https://oncoord.com");
+    }
+
+    /**
+     * Minimal in-memory TokenStore fake -- same pattern as
+     * TokenServiceSmokeTest's InMemoryTokenStore in oncoord-auth-common,
+     * not a reimplementation of the real JDBC-backed store used in
+     * production. This file's tests never verify a token; they only
+     * need TokenService.issue() to succeed without NPEing while
+     * building saved-property-alert/digest links.
+     */
+    private static final class InMemoryTokenStore implements TokenStore {
+        private final Map<String, TokenRecord> records = new HashMap<>();
+
+        @Override
+        public void save(String token, String subject, long createdAtEpochMillis) {
+            records.put(token, new TokenRecord(subject, createdAtEpochMillis));
+        }
+
+        @Override
+        public Optional<TokenRecord> findUnused(String token) {
+            return Optional.ofNullable(records.get(token));
+        }
+
+        @Override
+        public void markUsed(String token) {
+            // Not exercised by any test in this file -- no-op is fine.
+        }
     }
 
     @AfterEach
@@ -1043,6 +1095,79 @@ class DigestServiceTest {
 
         assertFalse(html.contains("88 Windward Lane, Portsmouth, NH"),
                 "unseasoned listing 15 days out is still noise -- the gap fix must not bypass seasoning entirely");
+    }
+
+    // ---- Saved-property alert: status_change events (fixed) --------------
+    //
+    // PropertyDigestRepository.findRecentChangesForProperties()'s
+    // event_type filter was missing 'status_change' (only had
+    // 'date_change'/'disappeared'), so a saved property cancelled/sold
+    // via status_change -- rather than a literal disappeared event --
+    // never generated a saved-property alert. buildChangeGroups()
+    // already knew how to classify status_change correctly (terminal ->
+    // Removed, non-terminal -> noise, see isRemovalEvent()/
+    // isNoiseStatusChange()); the rows just never reached it. These
+    // confirm both halves of that classification now actually arrive.
+
+    @Test
+    void renderSavedPropertyAlert_includesTerminalStatusChange_asRemoved() {
+        long propertyId = testData.property()
+                .address("9 Quarry Road, Nashua, NH")
+                .state("NH")
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .auctionDatetime("2026-07-20T10:00:00") // within 7 days -- seasoning waived
+                .insert();
+        testData.event(auctionId, "status_change")
+                .oldValue("active")
+                .newValue("cancelled")
+                .detectedAt("2026-07-14T09:00:00.000000+00:00")
+                .insert();
+        // Satisfies the existing (email-scoped) notification-history
+        // gate this path already applies, so a failure here can only be
+        // the repository gap, not the gate.
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"));
+
+        String html = digestService.renderSavedPropertyAlert(
+                TEST_EMAIL,
+                List.of(propertyId),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00")
+        );
+
+        assertNotNull(html,
+                "a saved property cancelled via status_change should generate an alert, not be silently dropped");
+        assertTrue(html.contains("9 Quarry Road, Nashua, NH"));
+        assertTrue(html.contains("class='tag'>Removed<"));
+    }
+
+    @Test
+    void renderSavedPropertyAlert_omitsNonTerminalStatusChange() {
+        // Companion test: confirms widening the repository query to
+        // include status_change doesn't introduce noise -- a
+        // non-terminal value (e.g. postponed -> active) must still be
+        // filtered out entirely, same as the weekly digest already does.
+        long propertyId = testData.property()
+                .address("10 Quarry Road, Nashua, NH")
+                .state("NH")
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .auctionDatetime("2026-07-20T10:00:00")
+                .insert();
+        testData.event(auctionId, "status_change")
+                .oldValue("postponed")
+                .newValue("active")
+                .detectedAt("2026-07-14T09:00:00.000000+00:00")
+                .insert();
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"));
+
+        String html = digestService.renderSavedPropertyAlert(
+                TEST_EMAIL,
+                List.of(propertyId),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00")
+        );
+
+        assertNull(html,
+                "a non-terminal status_change (active) is noise, not something a saved-property subscriber needs to act on");
     }
 
 }
