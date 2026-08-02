@@ -1237,4 +1237,59 @@ class DigestServiceTest {
         assertNull(rendered, "a non-terminal status_change is noise, same as the weekly digest's handling");
     }
 
+    // ---- BUG: "since" cutoff comparison is timezone-fragile ------------
+    //
+    // PropertyDigestRepository.findRecentChangesForProperties() (and
+    // findRecentChanges(), used by the weekly digest) filter with
+    // "WHERE e.detected_at >= ?", binding since.toString() as plain TEXT
+    // -- a lexicographic string comparison, not a true chronological one.
+    // auction_events.detected_at is always stored in explicit UTC
+    // ("...+00:00"). SavedPropertyAlertService's fallback cutoff
+    // (OffsetDateTime.now().minus(FALLBACK_LOOKBACK), used on a
+    // subscriber's first-ever alert) and DigestSendService's weekly
+    // changesSince (OffsetDateTime.now().minusDays(7), used on EVERY
+    // send) both call the zone-less OffsetDateTime.now(), which resolves
+    // to the JVM's default timezone -- not necessarily UTC. When it
+    // isn't, the resulting offset (e.g. "-04:00") makes the string
+    // comparison stop matching real chronological order.
+    //
+    // This test reproduces that directly at the query layer, without
+    // touching JVM-wide timezone state (which would be invasive and
+    // flaky): it hands renderSavedPropertyAlert() a "since" cutoff with
+    // a non-UTC offset, exactly like the buggy fallback would produce on
+    // a non-UTC server, and inserts an event that is genuinely OLDER
+    // than that cutoff's true instant. Correct behavior is exclusion
+    // (null); the bug causes it to be wrongly included instead.
+    @Test
+    void renderSavedPropertyAlert_excludesChangeBeforeCutoff_regardlessOfCutoffOffset() {
+        long propertyId = testData.property()
+                .address("17 Timezone Trap Lane, Nashua, NH")
+                .state("NH")
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .auctionDatetime("2026-07-20T10:00:00")
+                .insert();
+        // True UTC instant: 2026-07-14T10:00:00Z.
+        testData.event(auctionId, "date_change")
+                .oldValue("2026-07-05T10:00:00")
+                .newValue("2026-07-20T10:00:00")
+                .detectedAt("2026-07-14T10:00:00.000000+00:00")
+                .insert();
+
+        // Same shape as SavedPropertyAlertService's fallback cutoff on a
+        // non-UTC server (e.g. America/New_York, EDT = UTC-4). True UTC
+        // instant: 2026-07-14T13:00:00Z -- three hours AFTER the event
+        // above, so the event is genuinely too old and should be
+        // excluded. The naive string comparison instead sees "...T10:"
+        // > "...T09:" in the date_change's favor and wrongly includes it.
+        OffsetDateTime nonUtcSince = OffsetDateTime.parse("2026-07-14T09:00:00-04:00");
+
+        DigestService.RenderedDigest rendered = digestService.renderSavedPropertyAlert(
+                TEST_EMAIL, List.of(propertyId), nonUtcSince);
+
+        assertNull(rendered,
+                "the event's true UTC instant (10:00Z) is before the cutoff's true UTC instant (13:00Z) -- "
+                        + "it should be excluded regardless of what offset the cutoff happens to be expressed in");
+    }
+
 }
