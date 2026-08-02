@@ -500,12 +500,17 @@ class DigestServiceTest {
                 "no disappeared rows exist, so that subheading should not render at all");
     }
 
-    // ---- listing/map links on Status Change rows --------------------
+    // ---- listing/map links on change rows ---------------------------
     //
-    // Every bucket shares the same changeRow()/changeLinkCell() code
-    // path, so exercising it via one bucket (date_change) is
-    // representative of all four -- the gating logic doesn't know or
-    // care which bucket a row ends up in.
+    // The 2-week window (NEW_LISTING_LINK_WINDOW_DAYS) only applies to
+    // "New" rows -- a listing we've only just seen once, whose auction
+    // is still far out, could still get postponed or pulled before
+    // then. Every OTHER category (Date Changes, Status Changes) skips
+    // the window check entirely: a change happening to a listing is
+    // itself proof we've already observed it more than once -- it's an
+    // established listing, not an unverified brand-new one. "Removed"
+    // gets no link cell at all, window or not -- there's nothing
+    // "coming" for a listing that's gone.
 
     @Test
     void render_showsListingAndMapLinks_forChangeWithinTwoWeeks() {
@@ -542,7 +547,47 @@ class DigestServiceTest {
     }
 
     @Test
-    void render_omitsListingLinks_forChangeMoreThanTwoWeeksOut() {
+    void render_omitsListingLink_forNewListingMoreThanTwoWeeksOut() {
+        // Regression guard for the window itself: a brand-new listing
+        // (first_seen only, no other change type -- see buildChangeGroups'
+        // "New" classification) that far out should still get "Coming
+        // soon", not a link. This is the one case the window is
+        // actually meant to gate.
+        String auctionDateTime = LocalDateTime.now().withNano(0).plusDays(45).toString();
+
+        long propertyId = testData.property()
+                .address("500 Elmwood Ave, Keene, NH")
+                .state("NH")
+                .latLng(42.9337, -72.2781)
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .auctionDatetime(auctionDateTime)
+                .sourceUrl("https://example.com/listing/9002")
+                .insert();
+        testData.event(auctionId, "first_seen")
+                .newValue(auctionDateTime)
+                .insert();
+
+        String html = digestService.render(
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertTrue(html.contains("500 Elmwood Ave, Keene, NH"),
+                "the row itself should still render -- only the link is gated by the window");
+        assertFalse(html.contains("https://example.com/listing/9002"),
+                "a brand-new listing more than 2 weeks out shouldn't get a View listing link yet");
+        assertTrue(html.contains("Coming soon"));
+    }
+
+    @Test
+    void render_includesListingLink_forDateChangeMoreThanTwoWeeksOut() {
+        // The behavior render_omitsListingLink_forNewListingMoreThanTwoWeeksOut
+        // used to assert for EVERY category (including this one) before
+        // the fix: a date_change is proof we've already observed this
+        // listing before, so the 2-week window doesn't apply here even
+        // though the auction itself is far out.
         String auctionDateTime = LocalDateTime.now().withNano(0).plusDays(45).toString();
 
         long propertyId = testData.property()
@@ -565,10 +610,38 @@ class DigestServiceTest {
                 false
         );
 
-        assertTrue(html.contains("500 Elmwood Ave, Keene, NH"),
-                "the row itself should still render -- only the link is gated by the window");
-        assertFalse(html.contains("https://example.com/listing/9002"),
-                "a change more than 2 weeks out should not get a View listing link");
+        assertTrue(html.contains("https://example.com/listing/9002"),
+                "a date-changed listing is already established -- the far-out auction date shouldn't withhold the link");
+    }
+
+    @Test
+    void render_omitsListingLink_forRemovedListing() {
+        long propertyId = testData.property()
+                .address("77 Foundry Court, Nashua, NH")
+                .state("NH")
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .sourceUrl("https://example.com/listing/9003")
+                .insert();
+        testData.event(auctionId, "disappeared")
+                .oldValue("active")
+                .detectedAt("2026-07-14T09:00:00.000000+00:00")
+                .insert();
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"));
+
+        String html = digestService.render(
+                TEST_EMAIL,
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertTrue(html.contains("77 Foundry Court, Nashua, NH"));
+        assertTrue(html.contains("class='tag'>Removed<"));
+        assertFalse(html.contains("https://example.com/listing/9003"),
+                "a removed listing shouldn't link to a page that no longer represents an active auction");
+        assertFalse(html.contains("Coming soon"),
+                "nothing is \"coming\" for a listing that's already gone -- the cell should be empty, not this label");
     }
 
     // ---- Removed gating: notification history --------------------------

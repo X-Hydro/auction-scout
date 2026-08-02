@@ -663,22 +663,24 @@ public class DigestService {
         String isoDate = listing.auctionDateTime() != null ? listing.auctionDateTime().toString() : "";
         return "<tr data-state='%s' data-date='%s' data-category='%s'><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n"
                 .formatted(escape(listing.state()), isoDate, escape(category),
-                        escape(listing.address()), dateText, labels, changeLinkCell(listing));
+                        escape(listing.address()), dateText, labels, changeLinkCell(listing, category));
     }
 
     /** "View listing"/"View map" links, or "Coming soon" past NEW_LISTING_LINK_WINDOW_DAYS (postponements make a link unreliable that far out), or nothing if dateless. */
-    private String changeLinkCell(ChangedListing listing) {
-        if (listing.auctionDateTime() == null) {
+    private String changeLinkCell(ChangedListing listing, String category) {
+        if (listing.auctionDateTime() == null || "Removed".equals(category)) {
             return "";
         }
-        boolean withinWindow = listing.auctionDateTime().isBefore(LocalDateTime.now().plusDays(NEW_LISTING_LINK_WINDOW_DAYS));
-        if (!withinWindow) {
-            return "<span class='empty'>Coming soon</span>";
+
+        if ("New".equals(category)) {
+            boolean withinWindow = listing.auctionDateTime().isBefore(LocalDateTime.now().plusDays(NEW_LISTING_LINK_WINDOW_DAYS));
+            if (!withinWindow) {
+                return "<span class='empty'>Coming soon</span>";
+            }
         }
 
         String mapUrl = mapUrl(listing.latitude(), listing.longitude());
         String mapLink = mapUrl.isEmpty() ? "" : " &nbsp;·&nbsp; <a href='%s'>View map →</a>".formatted(mapUrl);
-
         return "<a href='%s'>View listing →</a>%s".formatted(listing.sourceUrl(), mapLink);
     }
 
