@@ -2,6 +2,8 @@ package com.oncoord.auctionscout.web;
 
 import com.oncoord.auctionscout.digest.DigestSendService;
 import com.oncoord.auctionscout.subscriber.SubscriberRepository;
+import com.oncoord.auth.common.TokenRecord;
+import com.oncoord.auth.common.TokenService;
 import com.stripe.exception.InvalidRequestException;
 import com.stripe.exception.StripeException;
 import com.stripe.model.Subscription;
@@ -33,12 +35,23 @@ public class PreferencesController {
     // states regardless of content).
     private static final Set<String> VALID_STATES = Set.of("ME", "NH", "VT", "MA", "RI", "CT");
 
+    // Must match DigestService.VIEW_TOKEN_TTL_MILLIS / StatusController's
+    // own copy -- the token is minted in DigestService and checked here;
+    // a mismatch would either reject a link the sender intended to still
+    // be valid, or accept one the sender intended to have already
+    // expired. Same duplication StatusController already has, flagged
+    // there as a candidate for a shared constant later.
+    private static final long VIEW_TOKEN_TTL_MILLIS = 7L * 24 * 60 * 60 * 1000;
+
     private final SubscriberRepository subscribers;
     private final DigestSendService digestSendService;
+    private final TokenService tokenService;
 
-    public PreferencesController(SubscriberRepository subscribers, DigestSendService digestSendService) {
+    public PreferencesController(SubscriberRepository subscribers, DigestSendService digestSendService,
+                                 TokenService tokenService) {
         this.subscribers = subscribers;
         this.digestSendService = digestSendService;
+        this.tokenService = tokenService;
     }
 
     // emailAlertsEnabled defaults to true when omitted, so existing
@@ -47,8 +60,16 @@ public class PreferencesController {
     public record SetStatesRequest(List<String> states, Boolean emailAlertsEnabled) {}
 
     @GetMapping("/preferences")
-    public ResponseEntity<?> getPreferences(@RequestHeader("X-Session-Token") String sessionToken) {
-        Optional<String> email = subscribers.findEmailBySessionToken(sessionToken);
+    public ResponseEntity<?> getPreferences(@RequestHeader(value = "X-Session-Token", required = false) String sessionToken,
+                                            @RequestParam(required = false) String vt) {
+        Optional<String> email = (sessionToken != null && !sessionToken.isBlank())
+                ? subscribers.findEmailBySessionToken(sessionToken)
+                : Optional.empty();
+
+        if (email.isEmpty() && vt != null && !vt.isBlank()) {
+            email = tokenService.peek(vt, VIEW_TOKEN_TTL_MILLIS).map(TokenRecord::subject);
+        }
+
         if (email.isEmpty()) {
             return ResponseEntity.status(401).body(Map.of("error", "Invalid or expired session"));
         }
