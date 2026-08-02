@@ -306,7 +306,7 @@ public class DigestService {
                 <div class='header'><h1>AuctionScout — Saved Property Update</h1><p>Something changed on one of your saved properties</p></div>
                 <div class='section'>
                 %s
-                <p style='margin-top:16px;'><a href='%s'>View on your AuctionScout dashboard →</a></p>
+                <p style='margin-top:16px;'><a href='%s'>View AuctionScout dashboard →</a></p>
                 </div>
                 <div class='footer'>You're receiving this because one or more of your saved properties changed. <a href='%s'>Manage preferences</a>
                 <p style='margin-top:8px;font-size:13px;color:#666;'>Your dashboard link above works without logging in. The preferences link signs you in automatically and works once -- if it's already been used, just log in normally from the <a href='%s'>AuctionScout</a> login page.</p>
