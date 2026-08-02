@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.RestController;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Manual one-off digest send for testing — no link to this from
@@ -36,15 +37,18 @@ import java.util.Map;
  * deliverability. See SavedPropertyAlertService.sendTestAlert().
  */
 @RestController
-public class AdminTestSendController {
+public class AdminEmailController {
 
     private final DigestSendService digestSendService;
     private final SavedPropertyAlertService savedPropertyAlertService;
     private final String adminKey;
 
-    public AdminTestSendController(DigestSendService digestSendService,
-                                   SavedPropertyAlertService savedPropertyAlertService,
-                                   @Value("${auctionscout.admin.test-send-key}") String adminKey) {
+
+    private final AtomicBoolean savedPropertyAlertRunInProgress = new AtomicBoolean(false);
+
+    public AdminEmailController(DigestSendService digestSendService,
+                                SavedPropertyAlertService savedPropertyAlertService,
+                                @Value("${auctionscout.admin.test-send-key}") String adminKey) {
         this.digestSendService = digestSendService;
         this.savedPropertyAlertService = savedPropertyAlertService;
         this.adminKey = adminKey;
@@ -101,9 +105,21 @@ public class AdminTestSendController {
             return ResponseEntity.status(401).body(Map.of("error", "Unauthorized"));
         }
 
-        int sentCount = savedPropertyAlertService.sendToAllActiveSubscribers();
+        if (!savedPropertyAlertRunInProgress.compareAndSet(false, true)) {
+            return ResponseEntity.status(409).body(Map.of(
+                    "error", "A saved-property alert run is already in progress. Wait for it to finish before starting another."
+            ));
+        }
 
-        return ResponseEntity.ok(Map.of("result", "DONE", "sentCount", sentCount));
+        try {
+            int sentCount = savedPropertyAlertService.sendToAllActiveSubscribers();
+            return ResponseEntity.ok(Map.of("result", "DONE", "sentCount", sentCount));
+        } finally {
+            // Always released, success or exception -- otherwise one
+            // failed run would permanently wedge every future run behind
+            // a flag nothing will ever clear.
+            savedPropertyAlertRunInProgress.set(false);
+        }
     }
 
     private boolean keyMatches(String providedKey) {
