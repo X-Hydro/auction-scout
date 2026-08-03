@@ -297,7 +297,7 @@ public class DigestService {
                 .empty { color:#999; font-size:13px; font-style:italic; }
                 .footer { padding:20px 32px; font-size:11px; color:#999; }
             </style></head><body><div class='container'>
-            <div class='header'><h1>AuctionScout — Saved Property Update</h1><p>Something changed on one of your saved properties</p></div>
+            <div class='header'><h1>AuctionScout — Saved Property Update</h1><p>Recent changes on your saved properties</p></div>
             <div class='section'>
             <p>Hello %s,</p>
             %s
