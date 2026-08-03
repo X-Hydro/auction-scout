@@ -283,7 +283,19 @@ public class DigestService {
         String dashboardLink = statusUrl(subscribers.getStates(email), tokenService.issue(email));
         return """
             <html><head><base target="_top"><style>
-                ...same styles...
+                body { font-family: -apple-system, Helvetica, Arial, sans-serif; color: #1a1a1a; margin:0; padding:0; background:#f4f4f4; }
+                .container { max-width: 640px; margin: 0 auto; background:#ffffff; }
+                .header { background:#1a3a5c; color:#ffffff; padding:24px 32px; }
+                .header h1 { margin:0; font-size:20px; }
+                .header p { margin:4px 0 0; font-size:13px; opacity:0.85; }
+                .section { padding:24px 32px; }
+                .day-header { font-size:13px; font-weight:600; color:#666; margin:16px 0 8px; text-transform:uppercase; letter-spacing:0.03em; }
+                table.status-table { width:100%%; border-collapse:collapse; font-size:13px; }
+                table.status-table td { padding:8px 4px; border-bottom:1px solid #f0f0f0; }
+                table.status-table a { color:#1a5c9c; text-decoration:none; }
+                .tag { display:inline-block; padding:2px 8px; border-radius:3px; font-size:11px; font-weight:600; background:#eef0f4; color:#3a4556; }
+                .empty { color:#999; font-size:13px; font-style:italic; }
+                .footer { padding:20px 32px; font-size:11px; color:#999; }
             </style></head><body><div class='container'>
             <div class='header'><h1>AuctionScout — Saved Property Update</h1><p>Something changed on one of your saved properties</p></div>
             <div class='section'>
