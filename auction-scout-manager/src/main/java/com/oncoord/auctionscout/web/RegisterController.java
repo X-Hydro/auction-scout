@@ -55,8 +55,9 @@ public class RegisterController {
             subscribers.createUnverified(email);
         }
 
+        String username = subscribers.findUsernameByEmail(email).orElse(null);
         String rawToken = tokenService.issue(email);
-        mailer.sendRegistrationLink(email, rawToken);
+        mailer.sendRegistrationLink(email, rawToken, username);
 
         return ResponseEntity.ok(Map.of(
                 "message", "If that email is valid, a confirmation link has been sent."

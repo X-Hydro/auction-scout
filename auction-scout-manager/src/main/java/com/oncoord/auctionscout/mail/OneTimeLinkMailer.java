@@ -32,7 +32,7 @@ public class OneTimeLinkMailer {
         this.appBaseUrl = appBaseUrl;
     }
 
-    public void sendRegistrationLink(String email, String rawToken) {
+    public void sendRegistrationLink(String email, String rawToken, String username) {
         // Points at the frontend page, not directly at the backend
         // /verify endpoint — matches the pattern the dev-only stdout
         // stub already used. post-login.html is responsible for calling
@@ -42,22 +42,25 @@ public class OneTimeLinkMailer {
                 + URLEncoder.encode(email, StandardCharsets.UTF_8)
                 + "&token=" + URLEncoder.encode(rawToken, StandardCharsets.UTF_8);
 
+        String greetingName = (username != null && !username.isBlank()) ? username : "there";
+
         String subject = "Confirm your AuctionScout subscription";
         String html = """
-                <div style="font-family:-apple-system,Helvetica,Arial,sans-serif;color:#1a1a1a;max-width:480px;margin:0 auto;">
-                  <h2 style="color:#1a3a5c;">Confirm your email</h2>
-                  <p>Click below to confirm your AuctionScout subscription and start getting
-                  alerts for new and changed foreclosure auctions.</p>
-                  <p style="margin:24px 0;">
-                    <a href="%s" style="background:#1a3a5c;color:#ffffff;padding:10px 20px;
-                       border-radius:4px;text-decoration:none;display:inline-block;">
-                       Confirm subscription
-                    </a>
-                  </p>
-                  <p style="font-size:13px;color:#666;">This link expires in 30 minutes.
-                  If you didn't request this, you can ignore this email.</p>
-                </div>
-                """.formatted(verifyUrl);
+            <div style="font-family:-apple-system,Helvetica,Arial,sans-serif;color:#1a1a1a;max-width:480px;margin:0 auto;">
+              <h2 style="color:#1a3a5c;">Confirm your email</h2>
+              <p>Hello %s,</p>
+              <p>Click below to confirm your AuctionScout subscription and start getting
+              alerts for new and changed foreclosure auctions.</p>
+              <p style="margin:24px 0;">
+                <a href="%s" style="background:#1a3a5c;color:#ffffff;padding:10px 20px;
+                   border-radius:4px;text-decoration:none;display:inline-block;">
+                   Confirm subscription
+                </a>
+              </p>
+              <p style="font-size:13px;color:#666;">This link expires in 30 minutes.
+              If you didn't request this, you can ignore this email.</p>
+            </div>
+            """.formatted(greetingName, verifyUrl);
 
         send(email, subject, html);
     }

@@ -476,5 +476,14 @@ public class SubscriberRepository {
     }
 
 
+    public Optional<String> findUsernameByEmail(String email) {
+        return jdbc.query(
+                "SELECT username FROM subscribers WHERE email = ?",
+                rs -> rs.next() ? Optional.ofNullable(rs.getString("username")) : Optional.empty(),
+                email
+        );
+    }
+
+
 
 }
