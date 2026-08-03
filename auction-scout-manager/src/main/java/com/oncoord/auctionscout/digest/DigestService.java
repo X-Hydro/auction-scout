@@ -263,8 +263,6 @@ public class DigestService {
                     .map(l -> "<span class='tag'>%s</span>".formatted(escape(l)))
                     .collect(java.util.stream.Collectors.joining(" "));
             String row = changeRow(g.listing(), dateText, labelsHtml, g.category());
-            // Only these two categories can appear here -- see javadoc
-            // on renderSavedPropertyAlert().
             if ("Removed".equals(g.category())) {
                 removedRows.add(row);
             } else {
@@ -279,40 +277,25 @@ public class DigestService {
             sections.append("<p class='empty'>No recent date changes or removals on your saved properties.</p>");
         }
 
+        String greetingName = escape(subscribers.findUsernameByEmail(email).filter(s -> !s.isBlank()).orElse("there"));
+
         String preferencesLink = buildPreferencesLink(email);
-        // statusUrl()'s view token now carries the same entitlement
-        // proof buildAutoLoginLink used to need a full login for --
-        // status.html resolves it server-side to this subscriber's
-        // real state count instead of capping at the free tier. Unlike
-        // the old post-login.html hop, this is non-consuming, so it
-        // still works if the subscriber opens this email more than once.
         String dashboardLink = statusUrl(subscribers.getStates(email), tokenService.issue(email));
         return """
-                <html><head><base target="_top"><style>
-                    body { font-family: -apple-system, Helvetica, Arial, sans-serif; color: #1a1a1a; margin:0; padding:0; background:#f4f4f4; }
-                    .container { max-width: 640px; margin: 0 auto; background:#ffffff; }
-                    .header { background:#1a3a5c; color:#ffffff; padding:24px 32px; }
-                    .header h1 { margin:0; font-size:20px; }
-                    .header p { margin:4px 0 0; font-size:13px; opacity:0.85; }
-                    .section { padding:24px 32px; }
-                    .day-header { font-size:13px; font-weight:600; color:#666; margin:16px 0 8px; text-transform:uppercase; letter-spacing:0.03em; }
-                    table.status-table { width:100%%; border-collapse:collapse; font-size:13px; }
-                    table.status-table td { padding:8px 4px; border-bottom:1px solid #f0f0f0; }
-                    table.status-table a { color:#1a5c9c; text-decoration:none; }
-                    .tag { display:inline-block; padding:2px 8px; border-radius:3px; font-size:11px; font-weight:600; background:#eef0f4; color:#3a4556; }
-                    .empty { color:#999; font-size:13px; font-style:italic; }
-                    .footer { padding:20px 32px; font-size:11px; color:#999; }
-                </style></head><body><div class='container'>
-                <div class='header'><h1>AuctionScout — Saved Property Update</h1><p>Something changed on one of your saved properties</p></div>
-                <div class='section'>
-                %s
-                <p style='margin-top:16px;'><a href='%s'>View AuctionScout dashboard →</a></p>
-                </div>
-                <div class='footer'>You're receiving this because one or more of your saved properties changed. <a href='%s'>Manage preferences</a>
-                <p style='margin-top:8px;font-size:13px;color:#666;'>Your dashboard link above works without logging in. The preferences link signs you in automatically and works once -- if it's already been used, just log in normally from the <a href='%s'>AuctionScout</a> login page.</p>
-                </div>
-                </div></body></html>
-                """.formatted(sections.toString(), dashboardLink, preferencesLink, appBaseUrl + "/auction-scout/register.html");
+            <html><head><base target="_top"><style>
+                ...same styles...
+            </style></head><body><div class='container'>
+            <div class='header'><h1>AuctionScout — Saved Property Update</h1><p>Something changed on one of your saved properties</p></div>
+            <div class='section'>
+            <p>Hello %s,</p>
+            %s
+            <p style='margin-top:16px;'><a href='%s'>View AuctionScout dashboard →</a></p>
+            </div>
+            <div class='footer'>You're receiving this because one or more of your saved properties changed. <a href='%s'>Manage preferences</a>
+            <p style='margin-top:8px;font-size:13px;color:#666;'>Your dashboard link above works without logging in. The preferences link signs you in automatically and works once -- if it's already been used, just log in normally from the <a href='%s'>AuctionScout</a> login page.</p>
+            </div>
+            </div></body></html>
+            """.formatted(greetingName, sections.toString(), dashboardLink, preferencesLink, appBaseUrl + "/auction-scout/register.html");
     }
 
     /**
