@@ -234,7 +234,7 @@ public class DigestService {
         if (groups.isEmpty()) {
             return null;
         }
-        return wrapSavedPropertyAlert(email, groups);
+        return wrapSavedPropertyAlert(email, groups, false, null);
     }
 
     /**
@@ -246,13 +246,14 @@ public class DigestService {
      * rather than an empty digest, so a test send is never
      * indistinguishable from a broken one.
      */
-    public String renderSavedPropertyAlertForTest(String email, List<Long> propertyIds, OffsetDateTime since) {
+    public String renderSavedPropertyAlertForTest(String email, List<Long> propertyIds, OffsetDateTime since,
+                                                  OffsetDateTime lastRealSentAt) {
         List<ChangedListing> changes = repository.findRecentChangesForProperties(propertyIds, since);
         List<ChangeGroup> groups = buildChangeGroups(changes, email, true);
-        return wrapSavedPropertyAlert(email, groups);
+        return wrapSavedPropertyAlert(email, groups, true, lastRealSentAt);
     }
 
-    private String wrapSavedPropertyAlert(String email, List<ChangeGroup> groups) {
+    private String wrapSavedPropertyAlert(String email, List<ChangeGroup> groups, boolean isTest, OffsetDateTime lastRealSentAt) {
         List<String> dateChangeRows = new java.util.ArrayList<>();
         List<String> removedRows = new java.util.ArrayList<>();
         for (ChangeGroup g : groups) {
@@ -262,6 +263,24 @@ public class DigestService {
             String labelsHtml = g.labels().stream()
                     .map(l -> "<span class='tag'>%s</span>".formatted(escape(l)))
                     .collect(java.util.stream.Collectors.joining(" "));
+            // Test-send only: label each row against the subscriber's
+            // last REAL saved-property-alert send (see
+            // SavedPropertyAlertService.sendTestAlert()) so a repeat
+            // test send doesn't read as "still not fixed" -- a row is
+            // "Already sent" if this exact change was detected before
+            // that real cutoff (so a real alert would already have
+            // covered it), "New since last alert" otherwise. No prior
+            // real send at all (lastRealSentAt null) means everything
+            // is necessarily new.
+            if (isTest) {
+                boolean alreadySent = lastRealSentAt != null
+                        && g.listing().detectedAt() != null
+                        && !g.listing().detectedAt().isAfter(lastRealSentAt);
+                String testTag = alreadySent
+                        ? "<span class='tag tag-already-sent'>Already sent</span>"
+                        : "<span class='tag tag-new-change'>New since last alert</span>";
+                labelsHtml = testTag + " " + labelsHtml;
+            }
             String row = changeRow(g.listing(), dateText, labelsHtml, g.category());
             if ("Removed".equals(g.category())) {
                 removedRows.add(row);
@@ -281,6 +300,20 @@ public class DigestService {
 
         String preferencesLink = buildPreferencesLink(email);
         String dashboardLink = statusUrl(subscribers.getStates(email), tokenService.issue(email));
+
+        // Visible only on the admin test-send path -- explains why a
+        // repeated test send always shows the same changes (fixed
+        // 90-day lookback, recordSent() deliberately never called; see
+        // SavedPropertyAlertService.sendTestAlert()) so this doesn't
+        // get mistaken for the dedup bug it's specifically NOT
+        // affected by.
+        String testBanner = isTest
+                ? "<div class='test-banner'>⚠️ TEST SEND — this always checks the last 90 days " +
+                "and does not mark anything as seen, so re-running it will keep showing the same " +
+                "changes (see each row's Already sent/New since last alert tag). This does not " +
+                "reflect what a real subscriber will receive.</div>"
+                : "";
+
         return """
             <html><head><base target="_top"><style>
                 body { font-family: -apple-system, Helvetica, Arial, sans-serif; color: #1a1a1a; margin:0; padding:0; background:#f4f4f4; }
@@ -288,16 +321,20 @@ public class DigestService {
                 .header { background:#1a3a5c; color:#ffffff; padding:24px 32px; }
                 .header h1 { margin:0; font-size:20px; }
                 .header p { margin:4px 0 0; font-size:13px; opacity:0.85; }
+                .test-banner { background:#fff8e1; border-bottom:1px solid #f0d878; color:#7a5c00; font-size:12px; font-weight:600; padding:10px 32px; }
                 .section { padding:24px 32px; }
                 .day-header { font-size:13px; font-weight:600; color:#666; margin:16px 0 8px; text-transform:uppercase; letter-spacing:0.03em; }
                 table.status-table { width:100%%; border-collapse:collapse; font-size:13px; }
                 table.status-table td { padding:8px 4px; border-bottom:1px solid #f0f0f0; }
                 table.status-table a { color:#1a5c9c; text-decoration:none; }
                 .tag { display:inline-block; padding:2px 8px; border-radius:3px; font-size:11px; font-weight:600; background:#eef0f4; color:#3a4556; }
+                .tag-already-sent { background:#eee; color:#888; }
+                .tag-new-change { background:#dff6dd; color:#1a7d34; }
                 .empty { color:#999; font-size:13px; font-style:italic; }
                 .footer { padding:20px 32px; font-size:11px; color:#999; }
             </style></head><body><div class='container'>
             <div class='header'><h1>AuctionScout — Saved Property Update</h1><p>Recent changes on your saved properties</p></div>
+            %s
             <div class='section'>
             <p>Hello %s,</p>
             %s
@@ -307,7 +344,7 @@ public class DigestService {
             <p style='margin-top:8px;font-size:13px;color:#666;'>Your dashboard link above works without logging in. The preferences link signs you in automatically and works once -- if it's already been used, just log in normally from the <a href='%s'>AuctionScout</a> login page.</p>
             </div>
             </div></body></html>
-            """.formatted(greetingName, sections.toString(), dashboardLink, preferencesLink, appBaseUrl + "/auction-scout/register.html");
+            """.formatted(testBanner, greetingName, sections.toString(), dashboardLink, preferencesLink, appBaseUrl + "/auction-scout/register.html");
     }
 
     /**

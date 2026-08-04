@@ -114,7 +114,16 @@ public class SavedPropertyAlertService {
         }
 
         OffsetDateTime since = OffsetDateTime.now().minus(TEST_LOOKBACK);
-        String html = digestService.renderSavedPropertyAlertForTest(email, propertyIds, since);
+        // Real (non-test) "last sent" cutoff, purely for per-row
+        // "Already sent" / "New since last alert" labeling in the test
+        // email -- distinct from `since`, which just widens the query
+        // itself. Null if this subscriber has never gotten a real
+        // saved-property alert, in which case every row is necessarily
+        // new (see DigestService.wrapSavedPropertyAlert()).
+        OffsetDateTime lastRealSentAt = notifications.findLastSentAtByType(email, TYPE_SAVED_PROPERTY_ALERT)
+                .map(epochMillis -> Instant.ofEpochMilli(epochMillis).atOffset(ZoneOffset.UTC))
+                .orElse(null);
+        String html = digestService.renderSavedPropertyAlertForTest(email, propertyIds, since, lastRealSentAt);
         mailer.send(email, "Updates on your saved properties (TEST)", html);
         return TestResult.SENT;
     }
