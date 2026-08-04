@@ -25,6 +25,8 @@ from urllib.parse import urlparse, parse_qs
 
 from dateutil import parser as dateparser
 
+from dedup import coord_key, winning_source
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -270,7 +272,8 @@ REPORT_WIDTH = 100
 
 
 def build_report(run_id, started_at, csv_path, db_path, records_found, records_new,
-                 records_changed, disappeared_count, records_failed, failures, cur):
+                 records_changed, disappeared_count, records_failed, failures, cur,
+                 cross_dupes_dropped=0):
     events = cur.execute(
         """SELECT e.event_type, e.old_value, e.new_value, p.address_raw
            FROM auction_events e
@@ -308,6 +311,7 @@ def build_report(run_id, started_at, csv_path, db_path, records_found, records_n
     L.append("SUMMARY")
     L.append("-" * REPORT_WIDTH)
     L.append(f"Listings processed:    {records_found}")
+    L.append(f"Cross-source dupes:    {cross_dupes_dropped} (dropped before load)")
     L.append(f"New properties:        {records_new}")
     L.append(f"Changed auctions:      {records_changed}")
     L.append(f"Removed listings:      {disappeared_count}")
@@ -420,6 +424,54 @@ def load(csv_path: str, db_path: str):
                 deduped[key] = (line_num, row, dt)  # last-in-file wins, no date on either
 
         rows_to_process = sorted(deduped.values(), key=lambda t: t[0])  # restore file order
+
+        # --- Cross-source dedup: collapse rows representing the same
+        # physical property across two CONFIRMED overlapping sources (see
+        # dedup.py's DEDUP_SOURCE_PRIORITY) before any `properties` row
+        # gets created. This is the actual point duplicate property rows
+        # get created -- run-scout.py's own CSV-level dedup only prevents
+        # duplicate MAP MARKERS and runs BEFORE geocoding, so it can't see
+        # coordinates at all and has to match on address text instead,
+        # which misses real cases like Harmon's address omitting the zip
+        # code that Patriot includes, or a typo'd city name ("Fall RIver"
+        # vs "Fall River"). Matched here on rounded (lat, lon) instead --
+        # by the time a row is in this CSV it's already been geocoded
+        # (rows with no coordinates never make it in, see run-scout.py's
+        # write_csv), so two independently-geocoded rows for the truly
+        # same address consistently land on the identical point, while
+        # genuinely different properties do not.
+        coord_groups = {}
+        for entry in rows_to_process:
+            _, row, _ = entry
+            key = coord_key(row["Latitude"], row["Longitude"])
+            coord_groups.setdefault(key, []).append(entry)
+
+        deduped_rows = []
+        cross_dupes_dropped = 0
+        for key, group in coord_groups.items():
+            if len(group) == 1:
+                deduped_rows.append(group[0])
+                continue
+            sources_present = {row["Source"] for _, row, _ in group}
+            priority = winning_source(sources_present)
+            if priority is None:
+                # Same coordinates, but not a confirmed overlapping source
+                # pair -- could be a real coincidence (two adjacent lots)
+                # or a source combination worth investigating; don't
+                # guess, keep every row. Same "don't guess" philosophy as
+                # run-scout.py's dedup_cross_source.
+                deduped_rows.extend(group)
+                continue
+            group.sort(key=lambda e: priority.index(e[1]["Source"]))
+            winner, losers = group[0], group[1:]
+            deduped_rows.append(winner)
+            cross_dupes_dropped += len(losers)
+            for _, loser_row, _ in losers:
+                print(f"[cross-source dedup] dropping {loser_row['Source']}: "
+                      f"{loser_row['Name']} (kept {winner[1]['Source']}: "
+                      f"{winner[1]['Name']})")
+
+        rows_to_process = sorted(deduped_rows, key=lambda t: t[0])
 
         for line_num, row, _ in rows_to_process:
             records_found += 1
@@ -580,7 +632,8 @@ def load(csv_path: str, db_path: str):
     conn.commit()
 
     report = build_report(run_id, ts, csv_path, db_path, records_found, records_new,
-                          records_changed, disappeared_count, records_failed, failures, cur)
+                          records_changed, disappeared_count, records_failed, failures, cur,
+                          cross_dupes_dropped=cross_dupes_dropped)
     print(report)
 
     reports_dir = os.path.join(SCRIPT_DIR, "reports")
