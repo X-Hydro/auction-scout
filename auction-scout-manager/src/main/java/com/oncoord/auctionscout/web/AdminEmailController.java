@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -88,22 +89,37 @@ public class AdminEmailController {
         return ResponseEntity.ok(Map.of("result", result.name()));
     }
 
+    public record RunSavedPropertyAlertsRequest(Boolean dryRun) {}
+
     /**
      * The REAL saved-property alert run -- emails every actively-
      * subscribed, alerts-enabled subscriber who has a saved property
      * with a recent date change or removal. Not a test: this is the
      * production send, manually triggered (see class javadoc) instead
-     * of running on a fixed cron. No request body -- there's no single
-     * target address, it runs against everyone eligible. Returns
-     * sentCount so the admin page can show something more useful than
-     * "it ran" -- most eligible subscribers on any given run will have
-     * nothing to report and are silently skipped.
+     * of running on a fixed cron. Returns sentCount so the admin page
+     * can show something more useful than "it ran" -- most eligible
+     * subscribers on any given run will have nothing to report and are
+     * silently skipped.
+     *
+     * Request body is optional and only carries dryRun -- there's no
+     * single target address either way, it always runs against every
+     * eligible subscriber. When dryRun is true, this renders exactly
+     * what each subscriber would receive (same subscriber set, same
+     * cutoff logic as the real send) but never sends mail and never
+     * advances anyone's real "last sent" cutoff -- see
+     * SavedPropertyAlertService.previewAllActiveSubscribers(). Shares
+     * the same in-progress guard as the real run since both walk the
+     * full subscriber set and render every eligible email; no reason to
+     * let a preview and a real run stomp on each other.
      */
     @PostMapping("/admin/run-saved-property-alerts")
-    public ResponseEntity<?> runSavedPropertyAlerts(@RequestHeader(value = "X-Admin-Key", required = false) String providedKey) {
+    public ResponseEntity<?> runSavedPropertyAlerts(@RequestHeader(value = "X-Admin-Key", required = false) String providedKey,
+                                                    @RequestBody(required = false) RunSavedPropertyAlertsRequest req) {
         if (!keyMatches(providedKey)) {
             return ResponseEntity.status(401).body(Map.of("error", "Unauthorized"));
         }
+
+        boolean dryRun = req != null && Boolean.TRUE.equals(req.dryRun());
 
         if (!savedPropertyAlertRunInProgress.compareAndSet(false, true)) {
             return ResponseEntity.status(409).body(Map.of(
@@ -112,6 +128,15 @@ public class AdminEmailController {
         }
 
         try {
+            if (dryRun) {
+                List<SavedPropertyAlertService.PreviewResult> preview =
+                        savedPropertyAlertService.previewAllActiveSubscribers();
+                List<Map<String, String>> results = preview.stream()
+                        .map(r -> Map.of("email", r.email(), "subject", r.subject(), "html", r.html()))
+                        .toList();
+                return ResponseEntity.ok(Map.of("dryRun", true, "results", results));
+            }
+
             int sentCount = savedPropertyAlertService.sendToAllActiveSubscribers();
             return ResponseEntity.ok(Map.of("result", "DONE", "sentCount", sentCount));
         } finally {

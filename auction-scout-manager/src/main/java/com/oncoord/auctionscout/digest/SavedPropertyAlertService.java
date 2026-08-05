@@ -10,6 +10,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -128,20 +129,34 @@ public class SavedPropertyAlertService {
         return TestResult.SENT;
     }
 
-    /** @return true if an email was actually sent, false if there was nothing to report. */
-    private boolean sendIfChanged(String email) {
+    /**
+     * Shared by sendIfChanged() and previewAllActiveSubscribers() --
+     * computes the same per-subscriber "since" cutoff and renders the
+     * same HTML either path would use, without sending anything or
+     * touching notifications. Kept side-effect-free so preview can call
+     * it freely with no risk of it silently drifting from what a real
+     * run would actually send.
+     *
+     * @return the rendered HTML, or null if there's nothing to report.
+     */
+    private String renderIfChanged(String email) {
         List<Long> propertyIds = savedProperties.findByEmail(email).stream()
                 .map(SavedPropertiesRepository.SavedProperty::propertyId)
                 .toList();
         if (propertyIds.isEmpty()) {
-            return false;
+            return null;
         }
 
         OffsetDateTime since = notifications.findLastSentAtByType(email, TYPE_SAVED_PROPERTY_ALERT)
                 .map(epochMillis -> Instant.ofEpochMilli(epochMillis).atOffset(ZoneOffset.UTC))
                 .orElse(OffsetDateTime.now().minus(FALLBACK_LOOKBACK));
 
-        String html = digestService.renderSavedPropertyAlert(email, propertyIds, since);
+        return digestService.renderSavedPropertyAlert(email, propertyIds, since);
+    }
+
+    /** @return true if an email was actually sent, false if there was nothing to report. */
+    private boolean sendIfChanged(String email) {
+        String html = renderIfChanged(email);
         if (html == null) {
             // Nothing to report -- no email sent, and deliberately no
             // notification row recorded either, so the next run still
@@ -154,5 +169,28 @@ public class SavedPropertyAlertService {
         Integer subscriberId = subscribers.findIdByEmail(email).orElse(null);
         notifications.recordSent(email, subscriberId, TYPE_SAVED_PROPERTY_ALERT);
         return true;
+    }
+
+    public record PreviewResult(String email, String subject, String html) {}
+
+    /**
+     * Dry-run counterpart to sendToAllActiveSubscribers() -- same
+     * subscriber set, same cutoff logic, same rendered output each
+     * subscriber would actually receive, but never calls mailer.send()
+     * and never calls notifications.recordSent(). Safe to run
+     * repeatedly: it can't advance anyone's real cutoff or skip changes
+     * a subsequent real run would have caught. Subscribers with nothing
+     * to report are omitted, matching sendIfChanged()'s "silently
+     * skipped" behavior on the real path.
+     */
+    public List<PreviewResult> previewAllActiveSubscribers() {
+        List<PreviewResult> results = new ArrayList<>();
+        for (SubscriberRepository.ActiveSubscriber s : subscribers.findActiveWithAlertsEnabled()) {
+            String html = renderIfChanged(s.email());
+            if (html != null) {
+                results.add(new PreviewResult(s.email(), "Updates on your saved properties", html));
+            }
+        }
+        return results;
     }
 }
