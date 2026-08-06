@@ -1,23 +1,70 @@
 """
 Run registered spiders and write a unified markers.csv for Google My Maps.
 
+Replaces the old run-scout.py / run-scout-ai.py split. One registry, one
+CSV pipeline, no --ai flag -- there's no spider left that runs two
+different ways depending on a flag; each spider either uses AI internally
+or it doesn't, full stop (see USES_AI below). Rationale for merging: the
+two scripts had drifted apart in ways that were only found while merging
+them -- run-scout-ai.py's REGISTRY was missing skypoint/landmark entirely
+(never backported after being added here), and it never called
+dedup_cross_source() at all, so the Landmark/Brock & Scott overlap was
+deduped in one script's output but not the other's. One registry means
+there's nothing left to drift.
+
+Layout this assumes (repo root = wherever this file lives):
+    run-scout.py
+    spiders/
+        sullivan.py, harmon.py, brockscott.py, jjmanning.py, towne.py,
+        patriot.py, skypoint.py, landmark.py
+        keenan_ai.py   <- the one spider that uses AI; see below and its
+                          own module docstring
+
 Usage:
-    python run-scout.py                       # run all available spiders
-    python run-scout.py --spiders sullivan    # run just one
+    python run-scout.py                       # run all spiders
+    python run-scout.py --spiders keenan       # run just one
     python run-scout.py --spiders sullivan harmon
-    python run-scout.py --list                # show what's registered/available
+    python run-scout.py --list                 # show what's registered,
+                                                 # and which use AI
+
+keenan uses AI internally, unconditionally, every run -- requires
+ANTHROPIC_API_KEY in your shell. Without it, keenan still runs and still
+produces id/url/date/status/street/city_state/description/terms (all from
+regex, unaffected), but property_type/bedrooms/bathrooms/sqft/lot_size/
+year_built come back blank and a warning gets logged per listing -- see
+spiders/keenan_ai.py's module docstring for why this site doesn't get a
+no-AI mode the way the others do. Every other spider (sullivan, harmon,
+brockscott, jjmanning, towne, patriot, skypoint, landmark) never calls
+the API at all, including sullivan/jjmanning/patriot -- those had AI
+variants in an earlier version of this pipeline that are now retired, not
+carried forward, so their Property Type/Bedrooms/Bathrooms/Sqft/Lot Size/
+Year Built columns stay blank same as harmon/brockscott/towne/skypoint/
+landmark's always have.
+
+geocode_overrides.csv is REQUIRED, not optional -- some real addresses
+(confirmed: sullivan:21317, sullivan:21318) fail BOTH Census and
+Nominatim automatic geocoding and can only be resolved via this manual
+file.
+
+Prints REAL measured API usage/cost for the run (not an estimate) --
+see ai_property_extractor.get_stats() -- but only when keenan (or any
+future AI-using spider) was actually part of the run, so a run without
+it doesn't print a noisy "0 calls, $0.00" line.
 """
 
 import argparse
 import csv
+import os
 import re
 import sys
 import shutil
 from datetime import date
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
-sys.path.insert(0, str(Path(__file__).parent / "spiders"))
+REPO_ROOT = Path(__file__).resolve().parent
+
+sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT / "spiders"))
 
 from spiders.sullivan import SullivanSpider
 from spiders.harmon import HarmonSpider
@@ -27,9 +74,11 @@ from spiders.towne import TowneAuctionSpider
 from spiders.patriot import PatriotSpider
 from spiders.skypoint import SkypointSpider
 from spiders.landmark import LandmarkSpider
+from spiders.keenan_ai import KeenanAISpider
 
 from base import DEFAULT_OVERRIDES_PATH
 from geocode import reverse_geocode_geography, geocode_with_fallbacks
+import ai_property_extractor
 
 
 # Spiders that are implemented and ready to run.
@@ -42,7 +91,16 @@ REGISTRY = {
     "patriot": PatriotSpider,
     "skypoint": SkypointSpider,
     "landmark": LandmarkSpider,
+    "keenan_ai": KeenanAISpider,
 }
+
+# Informational only (--list) -- the _ai suffix on a filename
+# (spiders/keenan_ai.py) is the primary at-a-glance signal for which
+# spiders call the AI extractor internally; this set just surfaces the
+# same fact in --list output without needing to check the filesystem.
+# Not a toggle -- there's no flag that changes a spider's AI usage, each
+# one just always does or never does.
+USES_AI = {"keenan_ai"}
 
 # Spiders that exist as a stub but are intentionally not runnable yet
 # (e.g. blocked by robots.txt) -- listed here so --spiders gives a clear
@@ -53,7 +111,7 @@ DEFAULT_OUT_PATH = "markers.csv"  # used when multiple spiders ran in one pass
 FIELDNAMES = [
     "ID", "Name", "Latitude", "Longitude", "Source", "State", "County", "Municipality",
     "Timing", "Property Type", "Bedrooms", "Bathrooms", "Sqft", "Lot Size", "Year Built",
-    "Description", "Auction Date/Time", "Status", "PDF Links", "URL",
+    "Summary", "Description", "Metadata", "Auction Date/Time", "Status", "PDF Links", "URL",
 ]
 
 
@@ -88,6 +146,30 @@ def resolve_spiders(names):
     return spider_classes
 
 
+def _require_ai_key_if_needed(spider_classes):
+    needs_ai = sorted({cls.name for cls in spider_classes if cls.name in USES_AI})
+    if not needs_ai:
+        return
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return
+
+    print(f"\nFATAL: ANTHROPIC_API_KEY is not set in this environment.")
+    print(f"{', '.join(needs_ai)} always call the AI extractor for every "
+          f"listing and cannot fall back to a no-AI mode -- running "
+          f"without a key would just produce blank property-spec columns "
+          f"for every listing, with no clear error, which is worse than "
+          f"not running at all.")
+    print(f"Set it in the SAME terminal you'll run this from, then try "
+          f"again. On Windows:")
+    print(f'  PowerShell (this session only): $env:ANTHROPIC_API_KEY = "sk-ant-..."')
+    print(f'  Persistent (open a NEW terminal after): setx ANTHROPIC_API_KEY "sk-ant-..."')
+    print(f"On macOS/Linux:")
+    print(f'  export ANTHROPIC_API_KEY="sk-ant-..."')
+    print(f"To confirm it's actually visible before re-running the full scrape:")
+    print(f'  python -c "import os; print(os.environ.get(\'ANTHROPIC_API_KEY\'))"')
+    sys.exit(1)
+
+
 # Matches a 2-letter state abbreviation, optionally followed by a zip
 # (5-digit or ZIP+4). Anchored to the end of the string since city_state's
 # last comma segment is "STATE" or "STATE ZIP" (e.g. "MA" or "MA 01880") --
@@ -113,7 +195,8 @@ STATE_RE = re.compile(r"\b([A-Z]{2})(?:\s+\d{5}(?:-\d{4})?)?\s*$")
 # duplicate, and silently dropping a real listing is worse than showing an
 # extra marker. Same "explicit, visible exception" philosophy as
 # harmon.py's respect_robots override -- this isn't a blanket assumption
-# that any two sources overlap.
+# that any two sources overlap. (No Keenan entry yet -- it's the first
+# Maine source, nothing confirmed to overlap with it so far.)
 DEDUP_SOURCE_PRIORITY = {
     frozenset({"landmark", "brockscott"}): ["landmark", "brockscott"],
 }
@@ -217,8 +300,8 @@ def dedup_cross_source(rows):
 
     return kept
 
-def format_row(row):
 
+def format_row(row):
     return {
         # "{source}:{id}" mirrors the geocode_batch() key -- this is the
         # stable identifier a customer can quote back to us to debug a
@@ -239,10 +322,9 @@ def format_row(row):
         "Sqft": row.get("sqft", "") or "",
         "Lot Size": row.get("lot_size", "") or "",
         "Year Built": row.get("year_built", "") or "",
-        # Free-text only now -- case #, court SP #, opening bid, book page,
-        # and anything else that doesn't have (or doesn't yet have) its own
-        # structured column.
+        "Summary": row.get("description", "") or "",
         "Description": row.get("extra_fields", ""),
+        "Metadata": row.get("metadata", "") or "",
         "Auction Date/Time": row["date_time"],
         "Status": row["status"],
         "PDF Links": row.get("pdf_links", ""),
@@ -263,13 +345,42 @@ def write_csv(path, rows):
     return written
 
 
+def _require_overrides_file(overrides_path):
+    path = Path(overrides_path)
+    if not path.exists():
+        print(f"\nFATAL: {overrides_path} does not exist.")
+        print(f"This file is required -- it's the only way some real "
+              f"addresses (confirmed: sullivan:21317, sullivan:21318) can "
+              f"be geocoded at all; Census and Nominatim both fail on them.")
+        print(f"Create it at the repo root with header:")
+        print(f"  id,latitude,longitude,address,note")
+        sys.exit(1)
+    if path.stat().st_size == 0:
+        print(f"\nFATAL: {overrides_path} exists but is empty (0 bytes).")
+        print(f"Add at least the header row: id,latitude,longitude,address,note")
+        sys.exit(1)
+    # Has a header but zero actual override rows -- not fatal (a genuinely
+    # empty-but-initialized file is plausible for a brand new site with no
+    # known geocoding failures yet), but worth a visible warning rather
+    # than silence, since it's easy to miss.
+    with open(path, newline="", encoding="utf-8") as f:
+        row_count = sum(1 for _ in csv.DictReader(f))
+    if row_count == 0:
+        print(f"WARNING: {overrides_path} has a header but zero override "
+              f"rows. If any addresses are known to fail automatic "
+              f"geocoding, they'll be silently dropped from the output.")
+    else:
+        print(f"[overrides] Loaded {overrides_path} ({row_count} manual override(s))")
+
+
 def main():
     args = parse_args()
 
     if args.list:
         print("Available:")
         for name in sorted(REGISTRY):
-            print(f"  {name}")
+            tag = " (uses AI internally, every run)" if name in USES_AI else ""
+            print(f"  {name}{tag}")
         print("Registered but unavailable:")
         for name, reason in sorted(KNOWN_UNAVAILABLE.items()):
             print(f"  {name} -- {reason}")
@@ -279,6 +390,14 @@ def main():
     if not spider_classes:
         print("No runnable spiders selected. Nothing to do.")
         return
+
+    _require_ai_key_if_needed(spider_classes)
+
+    # Reset unconditionally -- cheap, and get_stats() at the end decides
+    # whether to print based on whether anything actually happened, not
+    # on a flag. Covers keenan (and any future AI-using spider) with no
+    # special-casing needed here.
+    ai_property_extractor.reset_stats()
 
     all_rows = []
     for spider_cls in spider_classes:
@@ -295,7 +414,9 @@ def main():
         (f"{r['source']}:{r['id']}", f"{r['street']}, {r['city_state']}")
         for r in all_rows if r.get("id")
     ]
-    coords, still_unmatched = geocode_with_fallbacks(address_pairs)
+    overrides_path = str(REPO_ROOT / DEFAULT_OVERRIDES_PATH)
+    _require_overrides_file(overrides_path)
+    coords, still_unmatched = geocode_with_fallbacks(address_pairs, overrides_path=overrides_path)
 
     for row in all_rows:
         key = f"{row['source']}:{row['id']}"
@@ -345,6 +466,13 @@ def main():
                 print(f"Wrote {path} ({n} markers)")
                 backup = Path(f"{path}.{date.today():%Y.%m.%d}")
                 shutil.copy2(path, backup)
+
+    stats = ai_property_extractor.get_stats()
+    if stats["api_calls"] or stats["cache_hits"]:
+        print(f"\n--- AI usage this run ---")
+        print(f"  New extractions (real API calls): {stats['api_calls']}")
+        print(f"  Cache hits (no charge):            {stats['cache_hits']}")
+        print(f"  Estimated cost this run:           ${stats['estimated_cost']:.4f}")
 
 
 if __name__ == "__main__":

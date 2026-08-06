@@ -16,6 +16,7 @@ comment above the dedup block for the full tiebreak rules.
 """
 
 import csv
+import json
 import os
 import re
 import sqlite3
@@ -216,6 +217,36 @@ def _clean_bathrooms(raw: str):
         total = (int(full.group(1)) if full else 0) + 0.5 * (int(half.group(1)) if half else 0)
         return total if total else None
     return raw  # unrecognized format — keep the raw string rather than dropping it
+
+
+def _clean_summary(raw: str):
+    """Empty CSV value -> None (not ''), consistent with the other
+    optional columns above -- an empty string and 'no value' should mean
+    the same thing to the database."""
+    if not raw:
+        return None
+    raw = raw.strip()
+    return raw or None
+
+
+def _validate_metadata_json(raw: str, address: str):
+    """Light validation only -- still stored as-is even if malformed,
+    since dropping a whole row over a bad JSON string is worse than
+    storing something a future consumer has to handle defensively (same
+    'log loudly, don't crash the row' philosophy as the rest of this
+    file, e.g. base.py's _safe_read_json). Not every source populates
+    this yet -- an empty/missing value is normal, not a warning case."""
+    if not raw:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        json.loads(raw)
+    except (ValueError, TypeError) as e:
+        print(f"WARNING: malformed Metadata JSON for {address!r}, storing "
+              f"raw anyway: {e}")
+    return raw
 
 
 def resolve_property_details(row: dict, parsed_desc: dict) -> dict:
@@ -481,6 +512,8 @@ def load(csv_path: str, db_path: str):
                 listing_id = extract_listing_id(row["URL"], row["Name"])
                 parsed_desc = parse_description(row["Description"])
                 parsed_desc = resolve_property_details(row, parsed_desc)
+                summary = _clean_summary(row.get("Summary"))
+                metadata_json = _validate_metadata_json(row.get("Metadata"), row.get("Name", ""))
                 auction_dt = parse_auction_datetime(row["Auction Date/Time"])
                 status = row["Status"].strip().lower()
 
@@ -525,13 +558,15 @@ def load(csv_path: str, db_path: str):
                     cur.execute(
                         """INSERT INTO auctions
                            (property_id, auction_datetime_raw, auction_datetime, status,
-                            description_raw, property_type, bedrooms, bathrooms, sqft,
-                            lot_size_raw, year_built, mortgage_ref, source_url, last_updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            description_raw, summary, property_type, bedrooms, bathrooms, sqft,
+                            lot_size_raw, year_built, mortgage_ref, metadata_json, source_url,
+                            last_updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (property_id, row["Auction Date/Time"], auction_dt, status,
-                         row["Description"], parsed_desc["property_type"], parsed_desc["bedrooms"],
-                         parsed_desc["bathrooms"], parsed_desc["sqft"], parsed_desc["lot_size_raw"],
-                         parsed_desc["year_built"], parsed_desc["mortgage_ref"], row["URL"], ts),
+                         row["Description"], summary, parsed_desc["property_type"],
+                         parsed_desc["bedrooms"], parsed_desc["bathrooms"], parsed_desc["sqft"],
+                         parsed_desc["lot_size_raw"], parsed_desc["year_built"],
+                         parsed_desc["mortgage_ref"], metadata_json, row["URL"], ts),
                     )
                     auction_id = cur.lastrowid
                     cur.execute(
@@ -571,13 +606,15 @@ def load(csv_path: str, db_path: str):
                     cur.execute(
                         """UPDATE auctions SET
                                                auction_datetime_raw=?, auction_datetime=?, status=?,
-                                               description_raw=?, property_type=?, bedrooms=?, bathrooms=?, sqft=?,
-                                               lot_size_raw=?, year_built=?, mortgage_ref=?, source_url=?, last_updated_at=?
+                                               description_raw=?, summary=?, property_type=?, bedrooms=?,
+                                               bathrooms=?, sqft=?, lot_size_raw=?, year_built=?,
+                                               mortgage_ref=?, metadata_json=?, source_url=?, last_updated_at=?
                            WHERE auction_id=?""",
                         (row["Auction Date/Time"], auction_dt, status, row["Description"],
-                         parsed_desc["property_type"], parsed_desc["bedrooms"], parsed_desc["bathrooms"],
-                         parsed_desc["sqft"], parsed_desc["lot_size_raw"], parsed_desc["year_built"],
-                         parsed_desc["mortgage_ref"], row["URL"], ts, auction_id),
+                         summary, parsed_desc["property_type"], parsed_desc["bedrooms"],
+                         parsed_desc["bathrooms"], parsed_desc["sqft"], parsed_desc["lot_size_raw"],
+                         parsed_desc["year_built"], parsed_desc["mortgage_ref"], metadata_json,
+                         row["URL"], ts, auction_id),
                     )
             except Exception as e:
                 records_failed += 1

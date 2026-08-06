@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS auctions (
     auction_datetime      TEXT,                   -- parsed ISO8601, nullable if unparseable
     status                TEXT NOT NULL,          -- on|postponed|canceled|sold
     description_raw       TEXT,
+    summary               TEXT,                   -- short, glanceable one-line label (e.g. "2BR
     property_type         TEXT,
     bedrooms              INTEGER,
     bathrooms             REAL,
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS auctions (
     lot_size_raw          TEXT,                 -- kept raw: mixes acres/sf across listings
     year_built            INTEGER,
     mortgage_ref          TEXT,
+    metadata_json         TEXT,                   -- flex field for source-specific, ad-hoc data
     source_url            TEXT NOT NULL,
     last_updated_at       TEXT NOT NULL,
     UNIQUE(property_id)   -- one "current" auction row per property; history lives in auction_events
