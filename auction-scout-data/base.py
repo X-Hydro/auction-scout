@@ -346,11 +346,32 @@ class AuctionSpider(ABC):
         return self._robots.can_fetch(self.user_agent, url)
 
 
+    get_soup_max_attempts = 3
+    get_soup_retry_backoff = 2.0  # seconds; doubles each retry
+
     def get_soup(self, url):
         if not self.allowed(url):
             raise RobotsBlocked(f"{self.name}: robots.txt disallows {url}")
-        resp = requests.get(url, headers={"User-Agent": self.user_agent}, timeout=20)
-        resp.raise_for_status()
+
+        last_exc = None
+        for attempt in range(1, self.get_soup_max_attempts + 1):
+            try:
+                resp = requests.get(
+                    url, headers={"User-Agent": self.user_agent}, timeout=20
+                )
+                break
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout) as e:
+                last_exc = e
+                if attempt == self.get_soup_max_attempts:
+                    raise
+                wait = self.get_soup_retry_backoff * (2 ** (attempt - 1))
+                print(f"[{self.name}] {type(e).__name__} fetching {url} "
+                      f"(attempt {attempt}/{self.get_soup_max_attempts}) -- "
+                      f"retrying in {wait:.0f}s")
+                time.sleep(wait)
+
+        resp.raise_for_status()  # not retried -- see comment above
         return BeautifulSoup(resp.text, "html.parser")
 
     def scrape(self, scraped_cache_path=DEFAULT_SCRAPED_CACHE_PATH):
@@ -364,7 +385,7 @@ class AuctionSpider(ABC):
             print(f"[{self.name}] Fetching listing: {listing_url}")
             soup = self.get_soup(listing_url)
             for row in self.parse_listing(soup, listing_url):
-                #we still want cancelled for the reports... we just don't 
+                #we still want cancelled for the reports... we just don't
                 #want them on the maps
                 #if row.get("status", "").lower() in self.skip_statuses:
                 #    continue

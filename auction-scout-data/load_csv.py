@@ -61,10 +61,9 @@ def extract_listing_id(url: str, address: str = "") -> str:
     Pulls a stable per-source listing ID out of an auction URL. Different
     sources encode this differently — matched by domain rather than the
     CSV's Source column, since that's directly verifiable from the URL
-    itself rather than assuming a naming convention.
-
+    itself rather than assuming a naming convention
     Confirmed patterns:
-      sullivan-auctioneers.com : ?id=21007
+      sullivan-auctioneers.com : /auction/21094/6-march-street-worcester-ma/
       patriotauctioneers.com   : ?id=21306
       harmonlawoffices.com     : /auction/1942            (path, not query)
 
@@ -109,8 +108,15 @@ def extract_listing_id(url: str, address: str = "") -> str:
     if "skypointauctions.com" in domain and parsed.fragment:
         return parsed.fragment
 
-    # sullivan-auctioneers.com, patriotauctioneers.com, and any other/future
-    # source using a plain ?id= param all fall through to here.
+    if "sullivan-auctioneers.com" in domain:
+        if "id" in qs:  # old rows already in the DB, pre-migration
+            return qs["id"][0]
+        m = re.match(r"/auction/(\d+)/", parsed.path)
+        if m:
+            return m.group(1)
+
+    # patriotauctioneers.com and any other/future source using a plain
+    # ?id= param fall through to here.
     if "id" in qs:
         return qs["id"][0]
 

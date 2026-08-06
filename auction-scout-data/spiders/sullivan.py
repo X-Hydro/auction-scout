@@ -128,7 +128,7 @@ class SullivanSpider(AuctionSpider):
                 continue
 
             url = urljoin(self.base_url, link["href"])
-            auction_id = re.search(r"id=(\d+)", url)
+            auction_id = re.search(r"[?&]id=(\d+)", url) or re.search(r"/auction/(\d+)/", url)
             auction_id = auction_id.group(1) if auction_id else None
 
             status_raw = status_cell.get_text(strip=True)

@@ -453,6 +453,10 @@ def main():
     written = write_csv(out_path, all_rows)
     print(f"Wrote {out_path} ({written} markers from {len(spider_classes)} spider(s))")
 
+    dated_backup = Path(f"{out_path}.{date.today():%Y%m.%d}")
+    shutil.copy2(out_path, dated_backup)
+    print(f"Wrote dated snapshot {dated_backup}")
+
     if args.split_output:
         sources = sorted({row["source"] for row in all_rows})
         if len(sources) <= 1:
