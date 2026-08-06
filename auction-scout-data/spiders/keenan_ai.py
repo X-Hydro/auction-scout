@@ -1,155 +1,51 @@
 """
 Keenan Auction Company (keenanauction.com) -- Maine real estate auctions.
 
-Real estate only (list.cgi?t=1). Equipment auctions (list.cgi?t=2) are
-explicitly out of scope per instruction -- not real estate, not handled
-here, and this file doesn't try to be generic across both.
+Real estate only (list.cgi?t=1); equipment (list.cgi?t=2) is out of
+scope. robots.txt is unconfirmed -- couldn't fetch it directly. Verify
+before running if that matters.
 
-ROBOTS.TXT: not confirmed directly -- keenanauction.com/robots.txt couldn't
-be fetched to check. Google has both list.cgi and auction.cgi indexed
-(found via search), suggesting they aren't blocked for Googlebot at least,
-but that's not proof for other agents. Check /robots.txt yourself before
-running this. respect_robots is deliberately left unset (base.py's normal
-fail-closed default) rather than assumed clear -- if it turns out to be
-disallowed, that needs the same kind of explicit go-ahead documented in
-harmon.py before flipping it off, not just a guess.
+LIST PAGE: each listing lives in one <span id="BODYcopy"> holding the
+auction link, a no-year date, and a <b> block with title + address,
+optionally followed by red-flag <font> tags ("POSTPONED", "NEW DATE",
+"PIP AVAILABLE") -- only "POSTPONED" affects status; the rest land in
+extra_fields. Address formatting is inconsistent in the source itself
+(comma vs no comma between street/city; no address at all for portfolio
+listings) -- _split_address() degrades rather than guesses.
 
-LISTING PAGE (list.cgi?t=1): confirmed from a real fetch (2026-08-05, 10
-listings). Every listing is fully contained in one non-unique
-`<span id="BODYcopy">` (old hand-coded markup, duplicate ids throughout the
-site -- selecting by id works anyway since BeautifulSoup doesn't enforce
-uniqueness):
+DETAIL PAGE: each line is its own <span id="BODYcopy">. parse_detail()
+searches for the "Real Estate Foreclosure Auction..." header line rather
+than assuming it's line 0, since some pages (portfolio index pages) have
+preamble content first. The 5 lines after the header are auction#/title/
+street/city/date; everything after is label:value text (Real Estate/
+Preview/Directions/Terms).
 
-    <span id="BODYcopy"><a href="auction.cgi?i=5683">Auction 26-111</a>
-    Wed, Sep 2 at 02:00 PM<br>
-    <b>2BR Cape Style Home - 1+/- Acres<br>
-    32 Dolloff Rd., Sebago, Maine</b></span>
+PORTFOLIO LISTINGS: some list entries are an INDEX over several separate
+real auctions, not a property themselves (e.g. Auction 26-63/i=5641, a
+10-parcel portfolio). parse_listing() fetches every listing's detail
+page during discovery and expands a portfolio page
+(_extract_sub_listings()) into one row per real sub-listing instead of
+one ungeocodable row for the index itself. Sub-listing addresses have no
+state suffix in the source, so ", Maine" is appended before splitting.
 
-...optionally followed, still inside the same span, by one or more
-`<b><font color=red>FLAG</font></b>` tags. Confirmed flag text seen:
-"POSTPONED", "NEW DATE", "PIP AVAILABLE" (a Property Info Package is
-available -- not a status). Only "POSTPONED" is treated as a status here;
-the rest are informational and kept in extra_fields. NOT CONFIRMED: what a
-cancelled listing looks like on this page -- no example seen in the one
-fetch. If one shows up and isn't handled right, tell me the actual
-markup/text and I'll fix the detection.
+SUMMARY / DESCRIPTION / METADATA:
+- row["description"] (CSV "Summary") is the short list-page title --
+  parse_detail() never overwrites it with the longer "Real Estate:"
+  paragraph.
+- extra_fields (CSV "Description") holds Preview/Directions/Terms and
+  the PIP info-request link.
+- metadata (CSV "Metadata") holds the AI's own extra_fields output
+  (style, frontage, rooms, tax map, etc.) reshaped into real JSON via
+  _extra_fields_to_json(). Never overlaps property_type/bedrooms/etc --
+  the AI's system prompt already excludes those from extra_fields.
 
-Address formatting is genuinely inconsistent in the source itself -- not a
-parsing bug, the site really does mix these:
-  - most listings: "<street>, <city>, Maine" (2+ commas)
-  - at least 3 of the 10 real listings seen: "<street> <city>, Maine" --
-    NO comma between street and city ("590 Main St. Dixfield, Maine")
-  - one multi-town portfolio listing: no address at all, just
-    "Portland - Westbrook - Lewiston - Maine" (dash-joined, zero commas)
-_split_address() degrades gracefully across these rather than guessing at
-a split that isn't actually present in the source -- see its docstring.
-
-Date/time on the list page has NO YEAR ("Wed, Sep 2 at 02:00 PM") -- same
-issue as patriotauctioneers.com, handled the same way (_parse_no_year_date:
-dateutil fuzzy parse + roll forward a year if that lands >30 days in the
-past).
-
-DETAIL PAGE (auction.cgi?i=<id>): confirmed against exactly ONE real page
-(i=5683 / Auction 26-111, 2026-08-05) -- this is a real limitation, unlike
-Sullivan/Harmon's detail parsing this hasn't been checked against a
-land-only listing, a portfolio listing, or one missing a "Real Estate:"
-section. Structure: unlike the listing page, here each *line* is its own
-`<span id="BODYcopy">`, with `<br>` tags sitting between spans as
-separators rather than inside them -- so `find_all("span", id="BODYcopy")`
-yields one line per element, in order:
-
-    line 0: "Real Estate Foreclosure Auction 26-111"
-    line 1: title
-    line 2: street (trailing comma)
-    line 3: "city, Maine"
-    line 4: full date WITH year ("Wednesday, September 2, 2026 at 2PM")
-    ...then labeled free-text lines: "Real Estate:", "Preview:",
-    "Directions:", "Terms:" all confirmed present on the one page seen.
-    "Buyer Broker Participation Available." also appears but as its own
-    bolded sentence with no colon -- not a "Label:" line, so it is NOT
-    extracted (would need a different, unconfirmed pattern to capture).
-
-Line 4's date has a year, unlike the list page's -- preferred as
-authoritative when it parses, same "detail page refines list page" pattern
-as patriot.py's parse_detail().
-
-A "PIP" (Property Information Package) request link (`getinfo.cgi?a=...`)
-appeared on the one detail page seen, even though that particular listing
-(26-111) was NOT flagged "PIP AVAILABLE" on the list page -- unclear
-whether every real-estate detail page has this link or just some;
-captured opportunistically when present into `result["metadata"]` as
-JSON (`{"pip_link": "..."}`) -- see schema.sql's metadata_json column --
-flagged here as unconfirmed rather than asserted as a rule.
-
-PORTFOLIO LISTINGS: confirmed on Auction 26-63 (i=5641, 2026-08-06) -- a
-single list-page entry ("(12) Multi-Unit Residential & Commercial
-Buildings- (134) Units", address "Portland - Westbrook - Lewiston -
-Maine") whose own detail page isn't a property at all, just an INDEX over
-10 separate real auctions (i=5630-5639), each with its own real,
-geocodable address. Detected in parse_listing() via _extract_sub_listings()
--- every listing's detail page gets fetched during discovery (not just
-suspicious-looking ones) looking for "To View Auction Parcel N - <address>
-/ Click Here" link pairs; if found, that one row is replaced by one row
-per linked sub-listing instead of kept as a single bogus, ungeocodable
-row. Each sub-row then goes through the normal per-listing parse_detail()
-path exactly like any other listing. NOT CONFIRMED: whether i=5630-5639
-actually follow the same single-property template as the one confirmed
-plain page (i=5683) -- proceeding on that assumption since portfolio
-sub-listings are advertised as "individual property web pages" separate
-from the index, but if their fields come back wrong/empty, that's the
-first thing to check.
-
-AI EXTRACTION IS ALWAYS ON for this spider, not optional. Unlike sullivan/
-jjmanning/patriot (which stay plain/no-AI -- their sites are structured
-enough that the useful fields come from regex, and an earlier AI attempt
-for them was retired), this page's "Real Estate:" paragraph is the ONLY
-place property_type/bedrooms/bathrooms/sqft/lot_size/year_built exist at
-all, as free prose with zero structured markup behind it. There's no
-meaningfully different "plain" version of this spider to fall back to --
-every other field (address/date/status/Preview/Directions/Terms/pdf_links)
-already comes from parse_listing()/regex either way, so a no-AI mode would
-just mean permanently blank spec columns, not a cheaper equivalent. A
-failed/missing ANTHROPIC_API_KEY degrades gracefully to blank spec fields
-(see parse_detail()) rather than breaking the run, but there's no flag to
-turn AI off on purpose here -- if that's ever wanted, ask and I'll add one.
-
-KNOWN GAP, ACCEPTED (2026-08-06): investigated with real detail-page
-source for i=5670/5673 and several i=563x portfolio sub-listings --
-turns out this site has AT LEAST 3 distinct detail-page templates, not
-one template with occasional label gaps:
-  1. Plain residential (i=5683, i=5682, i=5667 confirmed) -- "Real Estate
-     Foreclosure Auction..." header, then a "Real Estate:" prose
-     paragraph. What this file was originally built around, and the
-     ONLY shape AI extraction runs on.
-  2. Commercial/land (i=5670, i=5673, i=5672, i=5671, i=5627 confirmed)
-     -- header says "Real Estate Auction..." (no "Foreclosure"),
-     "AUCTION DATE:" instead of a bare date line, NO "Real Estate:"
-     paragraph at all -- instead a narrative paragraph followed by
-     bulleted "* LOT SIZE:" / "* GROSS BUILDING AREA:" fields.
-  3. Portfolio sub-listings (i=5630-5639 confirmed) -- yet another shape:
-     "Auction Parcel #N" line, sometimes a neighborhood line, street+city
-     combined on one line, "Site"/"Improvements" bullet sections with
-     specs embedded in prose ("2BR,1BTH 1,189+/-SF").
-Decided NOT to chase per-template label variants further (confirmed to
-be an open-ended whack-a-mole -- every new page pasted revealed another
-shape) or to fall back to raw page text for the ones that don't match --
-every row already carries `url` pointing at the real listing, so a
-human who wants that content can just click through rather than the
-pipeline duplicating it. Templates 2 and 3 will have blank
-property_type/bedrooms/etc.; that's accepted, not pursued further.
-
-SUMMARY LABEL (2026-08-06, cheap partial mitigation for the gap above):
-row["description"] is a short, genuinely useful one-line label for every
-listing regardless of template -- parse_listing() already captures it
-from the list page's title line (e.g. "2BR Cape Style Home - 1+/- Acres",
-"31-Unit Apartment Building"), no AI or extra parsing involved. The only
-thing that was wrong: parse_detail() used to overwrite it with the full
-"Real Estate:" paragraph for template-1 listings specifically (the ones
-WITH that section) -- inconsistent (template 1 lost its short label,
-templates 2/3 never did) and traded a glanceable summary for a whole
-paragraph. Fixed by no longer writing description in parse_detail() at
-all; the short title from parse_listing() now persists untouched for
-every listing. Local `description` var there still feeds the AI call.
+AI EXTRACTION runs unconditionally on every listing -- there's no
+non-AI mode here (unlike sullivan/jjmanning/patriot). The "Real Estate:"
+paragraph is the only place property specs exist as prose; listings
+without one (confirmed: roughly half of real Keenan listings --
+commercial/land pages use a different bulleted-field template instead)
+just get blank spec columns, not an error. A failed/missing
+ANTHROPIC_API_KEY degrades to blank specs rather than breaking the run.
 """
 
 import copy
@@ -168,11 +64,9 @@ _LABEL_RE = re.compile(r"^(" + "|".join(re.escape(l) for l in LABELS) + r"):\s*(
 
 
 def _parse_no_year_date(text, reference=None):
-    """Keenan's list-page dates have no year ("Wed, Sep 2 at 02:00 PM") --
-    same issue as patriotauctioneers.com, same fix: parse assuming
-    `reference`'s year, then roll forward a year if that lands the date
-    more than 30 days in the past (handles auctions scraped near a year
-    boundary)."""
+    """List-page dates have no year -- parse against `reference`'s year,
+    then roll forward a year if that lands >30 days in the past (handles
+    scrapes near a year boundary)."""
     reference = reference or datetime.now()
     text = (text or "").strip()
     if not text:
@@ -187,10 +81,8 @@ def _parse_no_year_date(text, reference=None):
 
 
 def _date_text_after_link(a_tag):
-    """Plain text between the auction link and the first <br> in this
-    listing's span -- e.g. "Wed, Sep 2 at 02:00 PM". Walks siblings
-    rather than trusting a_tag.next_sibling to be exactly the text node,
-    in case a stray whitespace-only node intervenes."""
+    """Plain text between the auction link and the next <br> -- walks
+    siblings rather than trusting next_sibling to be exactly right."""
     parts = []
     for sib in a_tag.next_siblings:
         if getattr(sib, "name", None) == "br":
@@ -200,10 +92,8 @@ def _date_text_after_link(a_tag):
 
 
 def _lines_from_br(tag):
-    """Text lines inside `tag`, split on <br> -- the source stacks fields
-    (title / address) on separate visual lines with nothing else marking
-    the boundary. Operates on a deep copy so it doesn't disturb the
-    original soup (the same span gets read again for flags)."""
+    """Text lines inside `tag`, split on <br>. Operates on a deep copy
+    so the original soup (read again elsewhere) isn't disturbed."""
     clone = copy.deepcopy(tag)
     for br in clone.find_all("br"):
         br.replace_with("\n")
@@ -211,15 +101,12 @@ def _lines_from_br(tag):
 
 
 def _split_address(blob):
-    """Best-effort split of the list page's single address line into
-    (street, city, state). Confirmed inconsistent IN THE SOURCE ITSELF --
-    see module docstring. Degrades rather than guesses:
-      - 2+ commas: clean split via rsplit(',', 2) -- (street, city, state)
-      - exactly 1 comma: can't tell where street ends and city begins, so
-        the remainder before the comma is kept whole as `street`, city
-        left blank
-      - 0 commas (e.g. the dash-joined multi-town portfolio listing): the
-        whole blob is kept as `street`, city/state both blank
+    """Best-effort street/city/state split -- the source is inconsistent
+    (comma count varies; portfolio listings have no real address at
+    all), so this degrades rather than guesses:
+      - 2+ commas: clean 3-way split
+      - 1 comma: street kept whole, city left blank
+      - 0 commas: whole blob kept as street
     """
     if not blob:
         return "", "", ""
@@ -232,12 +119,8 @@ def _split_address(blob):
 
 
 def _extract_labeled_lines(lines):
-    """Map of label -> value for any of LABELS found at the start of a
-    line, among the free-text lines following the detail page's fixed
-    5-line header. Labels not present just don't show up in the result --
-    tolerated as a miss (matches sullivan.py's _extract_property_details
-    philosophy) rather than treated as an error, since only one detail
-    page has ever been confirmed and other listing types may omit some."""
+    """Map of label -> value for any LABELS found at the start of a
+    line. A missing label just doesn't appear in the result."""
     found = {}
     for line in lines:
         m = _LABEL_RE.match(line)
@@ -246,27 +129,36 @@ def _extract_labeled_lines(lines):
     return found
 
 
+def _extra_fields_to_json(extra_fields):
+    """Converts the AI's 'Label: value; Label: value' extra_fields
+    string into a dict for metadata_json. Keys are slugified from
+    whatever labels the model used -- there's no fixed label set to
+    look up against."""
+    if not extra_fields:
+        return {}
+    result = {}
+    for part in extra_fields.split("; "):
+        if ": " not in part:
+            continue
+        label, _, value = part.partition(": ")
+        key = re.sub(r"[^a-z0-9]+", "_", label.strip().lower()).strip("_")
+        value = value.strip()
+        if key and value:
+            result[key] = value
+    return result
+
+
 _HEADER_RE = re.compile(r"^Real Estate Foreclosure Auction\b", re.IGNORECASE)
 _PARCEL_LABEL_RE = re.compile(r"To View Auction Parcel\s+(\d+)\s*-\s*(.+)$", re.IGNORECASE)
 
 
 def _extract_sub_listings(soup, own_id):
     """
-    Detects a Keenan "portfolio" detail page -- one whose body is really
-    an INDEX over several separate real auctions, not a property of its
-    own. Confirmed on Auction 26-63 (i=5641, 2026-08-06): a 10-parcel
-    portfolio across Portland/Westbrook/Lewiston, whose body has no
-    "Real Estate:" section at all -- instead a sequence of
-    "To View Auction Parcel N - <address>" label lines, each immediately
-    followed by a line holding a "Click Here." link to a DIFFERENT
-    auction.cgi?i=<id> (own_id excluded, in case a page ever linked back
-    to itself). Each of those ids is a normal single-property page.
-
-    Returns a list of (parcel_num, address_text, sub_id, sub_href)
-    tuples, empty if this isn't a portfolio page. Matching is by strict
-    adjacency (label line, then the very next span) -- confirmed exact
-    on the one page seen (no blank filler line between a label and its
-    link), so no lookahead/fuzzy matching was needed.
+    Detects a portfolio index page: a sequence of "To View Auction
+    Parcel N - <address>" lines, each immediately followed by a line
+    holding a link to a DIFFERENT auction.cgi?i=<id> (own_id excluded).
+    Returns (parcel_num, address, sub_id, sub_href) tuples, empty if
+    this isn't a portfolio page.
     """
     results = []
     pending = None  # (parcel_num, address_text) waiting for its link span
@@ -290,8 +182,7 @@ def _extract_sub_listings(soup, own_id):
 class KeenanAISpider(AuctionSpider):
     name = "keenan"
     base_url = "https://keenanauction.com"
-    scrape_details = True  # list page has enough for a bare row, but detail
-    # has the year-qualified date plus Real Estate/Preview/Terms text
+    scrape_details = True
 
     def listing_urls(self):
         return [f"{self.base_url}/list.cgi?t=1"]
@@ -333,21 +224,12 @@ class KeenanAISpider(AuctionSpider):
             extra_parts = [f"Auction #: {auction_num}"] + flags
             url = urljoin(self.base_url, a["href"])
 
-            # Some listings are really an INDEX over several separate
-            # real auctions, not a property themselves -- confirmed on
-            # Auction 26-63 (i=5641, 2026-08-06): a 10-parcel portfolio
-            # across Portland/Westbrook/Lewiston, whose own address blob
-            # was un-splittable ("Portland - Westbrook - Lewiston -
-            # Maine", the zero-comma case _split_address() already had
-            # to degrade for) precisely because it isn't a real address
-            # at all -- see _extract_sub_listings(). Checked for on
-            # EVERY listing here (an extra detail-page fetch per row
-            # during discovery, not just ones that look suspicious) --
-            # same "run it every time" tradeoff harmon.py's ID-range
-            # probing makes: a handful of extra requests on a ~10-listing
-            # site is cheap insurance against silently treating a whole
-            # portfolio as one bogus, ungeocodable row instead of the
-            # real properties inside it.
+            # Some listings are an INDEX over several separate real
+            # auctions rather than a property themselves -- checked on
+            # every listing (not just suspicious-looking ones) via an
+            # extra detail-page fetch; cheap insurance on a ~10-listing
+            # site against silently treating a whole portfolio as one
+            # bogus, ungeocodable row.
             try:
                 detail_soup = self.get_soup(url)
                 sub_listings = _extract_sub_listings(detail_soup, auction_id)
@@ -361,27 +243,15 @@ class KeenanAISpider(AuctionSpider):
                       f"portfolio listing (Auction {auction_num}) -- "
                       f"expanding into one row per parcel")
                 for parcel_num, parcel_address, sub_id, sub_href in sub_listings:
-                    # Parcel addresses are "<street>, <city>" -- no state
-                    # at all (unlike the list page's "<street>, <city>,
-                    # Maine"). Appending ", Maine" before the same split
-                    # logic both fixes the format mismatch (reusing
-                    # _split_address() unmodified on a 2-part string would
-                    # misfile the city into the state slot) and matters
-                    # for real: without an explicit state, the geocoded
-                    # address string would just be "<street>, Portland" --
-                    # genuinely ambiguous (Portland, ME vs Portland, OR).
+                    # Parcel addresses have no state ("<street>, <city>")
+                    # -- appending ", Maine" reuses _split_address()
+                    # correctly instead of misfiling city into state.
                     sub_street, sub_city, sub_state = _split_address(
                         f"{parcel_address}, Maine"
                     )
                     rows.append({
                         "id": sub_id,
                         "url": urljoin(self.base_url, sub_href),
-                        # Date/status inherited from the portfolio listing
-                        # (individual parcel pages get their own chance to
-                        # refine date_time via the normal parse_detail()
-                        # path below, same as any other listing -- this is
-                        # just the starting value in case that page's own
-                        # date doesn't parse for some reason).
                         "date_time": date_text,
                         "auction_dt": auction_dt,
                         "timing": timing,
@@ -421,33 +291,19 @@ class KeenanAISpider(AuctionSpider):
         ]
         lines = [ln for ln in lines if ln]
 
-        # Find the actual header line rather than assuming lines[0] --
-        # confirmed necessary: the Auction 26-63 portfolio index page
-        # (i=5641) has several preamble lines first ("Property
-        # Information Package By City Available", disclosure/lead-paint
-        # notices, etc.) before its "Real Estate Foreclosure Auction..."
-        # line, which would silently misalign a fixed lines[0..4] read.
-        # That specific page gets expanded/skipped in parse_listing()
-        # before ever reaching here, but a normal single-property page
-        # HAVING similar preamble text hasn't been ruled out either way,
-        # so this searches rather than assumes even for the common case.
+        # Search for the header rather than assuming lines[0] -- some
+        # pages have preamble content before it.
         header_idx = next(
             (i for i, ln in enumerate(lines) if _HEADER_RE.match(ln)), None
         )
         if header_idx is None or len(lines) < header_idx + 5:
-            # No recognizable header at all -- bail out rather than guess
-            # at a different layout. The row's `url` (always set from
-            # parse_listing()) already points at the original page, so a
-            # human can still read the real listing directly -- no need
-            # to duplicate that content into the row itself.
             return {}
         lines = lines[header_idx:]
 
         result = {}
 
-        # Line 4 has a full date WITH year, unlike the list page -- prefer
-        # it as authoritative when it parses. Same "detail refines list"
-        # pattern as patriot.py's parse_detail().
+        # Line 4 has a full date WITH year, unlike the list page --
+        # prefer it as authoritative when it parses.
         try:
             detail_dt = date_parser.parse(lines[4], fuzzy=True)
             result["date_time"] = lines[4]
@@ -458,26 +314,11 @@ class KeenanAISpider(AuctionSpider):
 
         labeled = _extract_labeled_lines(lines[5:])
         description = labeled.get("Real Estate", "")
-        # Deliberately NOT setting result["description"] here. The row
-        # already carries a short title-like phrase from parse_listing()
-        # (e.g. "2BR Cape Style Home - 1+/- Acres", "31-Unit Apartment
-        # Building") -- genuinely useful as a glanceable one-line summary
-        # without clicking through to `url`. Overwriting it with this
-        # full "Real Estate:" paragraph (a whole paragraph, not a
-        # summary) would trade a useful short label for a long one, and
-        # only for listings that happen to have this specific section --
-        # commercial/land/portfolio listings never had a "Real Estate:"
-        # label at all, so they'd keep the short version while plain
-        # residential ones lost it. `description` (local var) still
-        # feeds the AI call below either way.
+        # result["description"] is deliberately not set here -- the row
+        # already carries a short title from parse_listing(), which is
+        # more useful as a glanceable summary than this full paragraph.
+        # `description` (local var) still feeds the AI call below.
 
-        # AI extraction, always on -- see module docstring for why this
-        # site doesn't get a no-AI mode the way sullivan/jjmanning/patriot
-        # do. Failure here (missing ANTHROPIC_API_KEY, API error, etc.)
-        # degrades to blank spec fields rather than breaking the run --
-        # the rest of this row (address/date/status/description/terms)
-        # already came from parse_listing()/the lines above and is
-        # unaffected.
         if description:
             try:
                 specs = extract_property_specs(
@@ -494,30 +335,24 @@ class KeenanAISpider(AuctionSpider):
             result["sqft"] = specs.sqft
             result["lot_size"] = specs.lot_size
             result["year_built"] = specs.year_built
-            ai_extra = specs.extra_fields
-        else:
-            ai_extra = None
+            if specs.extra_fields:
+                metadata = _extra_fields_to_json(specs.extra_fields)
+                if metadata:
+                    result["metadata"] = json.dumps(metadata)
 
         extra_parts = []
         for label in ("Preview", "Directions", "Terms"):
             if label in labeled:
                 extra_parts.append(f"{label}: {labeled[label]}")
-        if ai_extra:
-            extra_parts.append(ai_extra)
+
+        pip_link = soup.find("a", href=re.compile(r"getinfo\.cgi", re.IGNORECASE))
+        if pip_link and pip_link.get("href"):
+            extra_parts.append(
+                f"Info Request: {urljoin(self.base_url, pip_link['href'])}"
+            )
 
         if extra_parts:
             result["extra_fields"] = "; ".join(extra_parts)
-
-        # First real use of the metadata_json flex field (see schema.sql):
-        # a structured, source-specific link that doesn't fit any
-        # existing column and isn't free text either -- exactly what
-        # that field was reserved for, rather than folding it into
-        # extra_fields as one more semicolon-joined string.
-        pip_link = soup.find("a", href=re.compile(r"getinfo\.cgi", re.IGNORECASE))
-        if pip_link and pip_link.get("href"):
-            result["metadata"] = json.dumps(
-                {"pip_link": urljoin(self.base_url, pip_link["href"])}
-            )
 
         pdf_links = [
             clean_url(urljoin(self.base_url, a["href"]))
