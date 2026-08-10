@@ -378,6 +378,7 @@ class AuctionSpider(ABC):
         """Run the full pipeline for this spider: listing -> details ->
         dedupe -> return list of row dicts (NOT yet geocoded)."""
         by_id = {}
+        dropped_no_id = 0
         for listing_url in self.listing_urls():
             if not self.allowed(listing_url):
                 print(f"[{self.name}] SKIPPED (robots.txt disallows): {listing_url}")
@@ -390,9 +391,16 @@ class AuctionSpider(ABC):
                 #if row.get("status", "").lower() in self.skip_statuses:
                 #    continue
                 if not row.get("id"):
+                    dropped_no_id += 1
                     continue
                 row["source"] = self.name
                 by_id[(self.name, row["id"])] = row  # last one wins (handles postponed dupes)
+
+        if dropped_no_id:
+           print(f"[{self.name}] WARNING: dropped {dropped_no_id} row(s) with "
+                  f"no extractable id (parse_listing() found them but couldn't "
+                  f"pull an id -- often a sign the site's URL/markup format "
+                  f"changed). These rows are otherwise lost with no trace.")
 
         rows = list(by_id.values())
 

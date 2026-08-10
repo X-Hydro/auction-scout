@@ -79,6 +79,7 @@ from spiders.keenan_ai import KeenanAISpider
 from base import DEFAULT_OVERRIDES_PATH
 from geocode import reverse_geocode_geography, geocode_with_fallbacks
 import ai_property_extractor
+import run_qc
 
 
 # Spiders that are implemented and ready to run.
@@ -128,6 +129,15 @@ def parse_args():
         "--split-output", action="store_true",
         help="Also write a separate {source}_markers.csv per spider, "
              "in addition to the merged markers.csv",
+    )
+    p.add_argument(
+        "--strict", action="store_true",
+        help="Exit with a nonzero status if any spider's row count looks "
+             "anomalous (zero rows, or a sharp drop below recent normal, "
+             "per run_qc.py). The run still completes and writes its "
+             "output either way -- this only affects the exit code, so a "
+             "scheduler/cron job can detect and alert on a bad run instead "
+             "of it looking like a normal success.",
     )
     return p.parse_args()
 
@@ -400,12 +410,19 @@ def main():
     ai_property_extractor.reset_stats()
 
     all_rows = []
+    any_yield_warnings = False
+    run_date = date.today().isoformat()
+    stats_this_run = []
     for spider_cls in spider_classes:
         spider = spider_cls()
         print(f"--- {spider.name} ---")
         rows = spider.scrape()
         print(f"[{spider.name}] {len(rows)} auctions after dedupe/status filter")
+        if run_qc.check_yield(spider.name, len(rows), run_qc.load_recent_counts(spider.name)):
+            any_yield_warnings = True
+        stats_this_run.append((spider.name, len(rows)))
         all_rows.extend(rows)
+    run_qc.append_stats(run_date, stats_this_run)
 
     all_rows = dedup_cross_source(all_rows)
 
@@ -477,6 +494,10 @@ def main():
         print(f"  New extractions (real API calls): {stats['api_calls']}")
         print(f"  Cache hits (no charge):            {stats['cache_hits']}")
         print(f"  Estimated cost this run:           ${stats['estimated_cost']:.4f}")
+
+    if any_yield_warnings and args.strict:
+        print(f"\n--strict: exiting nonzero due to spider yield warning(s) above.")
+        sys.exit(2)
 
 
 if __name__ == "__main__":
