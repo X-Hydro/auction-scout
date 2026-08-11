@@ -75,6 +75,7 @@ from spiders.patriot import PatriotSpider
 from spiders.skypoint import SkypointSpider
 from spiders.landmark import LandmarkSpider
 from spiders.keenan_ai import KeenanAISpider
+from spiders.ct_judicial import CTJudicialSpider
 
 from base import DEFAULT_OVERRIDES_PATH
 from geocode import reverse_geocode_geography, geocode_with_fallbacks
@@ -82,8 +83,14 @@ import ai_property_extractor
 import run_qc
 
 
-# Spiders that are implemented and ready to run.
-REGISTRY = {
+# Every implemented spider, whether currently runnable or not. A spider is
+# unavailable if its class sets `unavailable_reason` to a non-None string
+# (e.g. spiders/ct_judicial.py, blocked by robots.txt) -- that's the ONLY
+# place availability is decided; REGISTRY/KNOWN_UNAVAILABLE below are just
+# derived from it, not hand-maintained. When a spider's status changes
+# (e.g. robots.txt permission granted), edit unavailable_reason on that
+# spider's own class -- nothing here needs to change.
+ALL_SPIDERS = {
     "sullivan": SullivanSpider,
     "harmon": HarmonSpider,
     "brockscott": BrockScottSpider,
@@ -93,6 +100,19 @@ REGISTRY = {
     "skypoint": SkypointSpider,
     "landmark": LandmarkSpider,
     "keenan_ai": KeenanAISpider,
+    #"ct_judicial": CTJudicialSpider, #blocked from scraping
+}
+
+REGISTRY = {
+    name: cls for name, cls in ALL_SPIDERS.items()
+    if not getattr(cls, "unavailable_reason", None)
+}
+
+# Derived the same way -- getattr default None means spiders that never
+# set unavailable_reason (the normal case) are simply never unavailable.
+KNOWN_UNAVAILABLE = {
+    name: cls.unavailable_reason for name, cls in ALL_SPIDERS.items()
+    if getattr(cls, "unavailable_reason", None)
 }
 
 # Informational only (--list) -- the _ai suffix on a filename
@@ -102,11 +122,6 @@ REGISTRY = {
 # Not a toggle -- there's no flag that changes a spider's AI usage, each
 # one just always does or never does.
 USES_AI = {"keenan_ai"}
-
-# Spiders that exist as a stub but are intentionally not runnable yet
-# (e.g. blocked by robots.txt) -- listed here so --spiders gives a clear
-# explanation instead of an argparse "invalid choice" error.
-KNOWN_UNAVAILABLE = {}
 
 DEFAULT_OUT_PATH = "markers.csv"  # used when multiple spiders ran in one pass
 FIELDNAMES = [
