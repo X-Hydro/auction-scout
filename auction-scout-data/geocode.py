@@ -37,6 +37,87 @@ NOMINATIM_USER_AGENT = (
 # tests (which send curl's own UA).
 CENSUS_USER_AGENT = "auction-scout/1.0 (research use; small nightly batch)"
 
+# Traditional CT counties (New Haven, Fairfield, Hartford, New London,
+# Litchfield, Middlesex, Tolland, Windham) -- these are what real estate
+# listings and buyers actually use. CT abolished county government in the
+# 1960s; the Census Bureau geocoder's "Counties" layer now returns the 9
+# Councils of Government / Planning Regions instead (e.g. "Naugatuck
+# Valley Planning Region"), which don't map 1:1 to traditional counties --
+# a Planning Region can span parts of two counties (confirmed: Ansonia is
+# in the Naugatuck Valley Planning Region but traditionally New Haven
+# County). Keyed by municipality name as returned by the "County
+# Subdivisions" layer (same NAME field reverse_geocode_geography already
+# strips town/city/etc. suffixes from below), so this only needs the
+# lat/lon already being reverse-geocoded -- no separate town lookup.
+CT_COUNTY_BY_TOWN = {
+    # New Haven County
+    "Ansonia": "New Haven", "Beacon Falls": "New Haven", "Bethany": "New Haven",
+    "Branford": "New Haven", "Cheshire": "New Haven", "Derby": "New Haven",
+    "East Haven": "New Haven", "Guilford": "New Haven", "Hamden": "New Haven",
+    "Madison": "New Haven", "Meriden": "New Haven", "Middlebury": "New Haven",
+    "Milford": "New Haven", "Naugatuck": "New Haven", "New Haven": "New Haven",
+    "North Branford": "New Haven", "North Haven": "New Haven", "Orange": "New Haven",
+    "Oxford": "New Haven", "Prospect": "New Haven", "Seymour": "New Haven",
+    "Southbury": "New Haven", "Wallingford": "New Haven", "Waterbury": "New Haven",
+    "West Haven": "New Haven", "Wolcott": "New Haven", "Woodbridge": "New Haven",
+    # Fairfield County
+    "Bethel": "Fairfield", "Bridgeport": "Fairfield", "Brookfield": "Fairfield",
+    "Danbury": "Fairfield", "Darien": "Fairfield", "Easton": "Fairfield",
+    "Fairfield": "Fairfield", "Greenwich": "Fairfield", "Monroe": "Fairfield",
+    "New Canaan": "Fairfield", "New Fairfield": "Fairfield", "Newtown": "Fairfield",
+    "Norwalk": "Fairfield", "Redding": "Fairfield", "Ridgefield": "Fairfield",
+    "Shelton": "Fairfield", "Sherman": "Fairfield", "Stamford": "Fairfield",
+    "Stratford": "Fairfield", "Trumbull": "Fairfield", "Weston": "Fairfield",
+    "Westport": "Fairfield", "Wilton": "Fairfield",
+    # Hartford County
+    "Avon": "Hartford", "Berlin": "Hartford", "Bloomfield": "Hartford",
+    "Bristol": "Hartford", "Burlington": "Hartford", "Canton": "Hartford",
+    "East Granby": "Hartford", "East Hartford": "Hartford", "East Windsor": "Hartford",
+    "Enfield": "Hartford", "Farmington": "Hartford", "Glastonbury": "Hartford",
+    "Granby": "Hartford", "Hartford": "Hartford", "Hartland": "Hartford",
+    "Manchester": "Hartford", "Marlborough": "Hartford", "New Britain": "Hartford",
+    "Newington": "Hartford", "Plainville": "Hartford", "Rocky Hill": "Hartford",
+    "Simsbury": "Hartford", "Southington": "Hartford", "South Windsor": "Hartford",
+    "Suffield": "Hartford", "West Hartford": "Hartford", "Wethersfield": "Hartford",
+    "Windsor": "Hartford", "Windsor Locks": "Hartford",
+    # New London County
+    "Bozrah": "New London", "Colchester": "New London", "East Lyme": "New London",
+    "Franklin": "New London", "Griswold": "New London", "Groton": "New London",
+    "Lebanon": "New London", "Ledyard": "New London", "Lisbon": "New London",
+    "Lyme": "New London", "Montville": "New London", "New London": "New London",
+    "North Stonington": "New London", "Norwich": "New London", "Old Lyme": "New London",
+    "Preston": "New London", "Salem": "New London", "Sprague": "New London",
+    "Stonington": "New London", "Voluntown": "New London", "Waterford": "New London",
+    # Litchfield County
+    "Barkhamsted": "Litchfield", "Bethlehem": "Litchfield", "Bridgewater": "Litchfield",
+    "Canaan": "Litchfield", "Colebrook": "Litchfield", "Cornwall": "Litchfield",
+    "Goshen": "Litchfield", "Harwinton": "Litchfield", "Kent": "Litchfield",
+    "Litchfield": "Litchfield", "Morris": "Litchfield", "New Hartford": "Litchfield",
+    "New Milford": "Litchfield", "Norfolk": "Litchfield", "North Canaan": "Litchfield",
+    "Plymouth": "Litchfield", "Roxbury": "Litchfield", "Salisbury": "Litchfield",
+    "Sharon": "Litchfield", "Thomaston": "Litchfield", "Torrington": "Litchfield",
+    "Warren": "Litchfield", "Washington": "Litchfield", "Watertown": "Litchfield",
+    "Winchester": "Litchfield", "Woodbury": "Litchfield",
+    # Middlesex County
+    "Chester": "Middlesex", "Clinton": "Middlesex", "Cromwell": "Middlesex",
+    "Deep River": "Middlesex", "Durham": "Middlesex", "East Haddam": "Middlesex",
+    "East Hampton": "Middlesex", "Essex": "Middlesex", "Haddam": "Middlesex",
+    "Killingworth": "Middlesex", "Middlefield": "Middlesex", "Middletown": "Middlesex",
+    "Old Saybrook": "Middlesex", "Portland": "Middlesex", "Westbrook": "Middlesex",
+    # Tolland County
+    "Andover": "Tolland", "Bolton": "Tolland", "Columbia": "Tolland",
+    "Coventry": "Tolland", "Ellington": "Tolland", "Hebron": "Tolland",
+    "Mansfield": "Tolland", "Somers": "Tolland", "Stafford": "Tolland",
+    "Tolland": "Tolland", "Union": "Tolland", "Vernon": "Tolland",
+    "Willington": "Tolland",
+    # Windham County
+    "Ashford": "Windham", "Brooklyn": "Windham", "Canterbury": "Windham",
+    "Chaplin": "Windham", "Eastford": "Windham", "Hampton": "Windham",
+    "Killingly": "Windham", "Plainfield": "Windham", "Pomfret": "Windham",
+    "Putnam": "Windham", "Scotland": "Windham", "Sterling": "Windham",
+    "Thompson": "Windham", "Windham": "Windham", "Woodstock": "Windham",
+}
+
 
 def _atomic_write_json(obj, path, **json_kwargs):
     """
@@ -246,20 +327,18 @@ def geocode_nominatim(address):
         if not results:
             return None, None
 
-        return (
-            float(results[0]["lat"]),
-            float(results[0]["lon"]),
-        )
+        return float(results[0]["lat"]), float(results[0]["lon"])
 
-    except Exception:
+    except Exception as e:
+        print(f"WARNING: Nominatim geocode failed for {address!r}: {e}")
         return None, None
 
 
 def geocode_batch_with_retry(chunk, max_retries=2, backoff_seconds=3):
     """
-    Wraps geocode_batch() with a few retries on transient failures (502s,
-    read timeouts) before giving up on this chunk. A single 502 or timeout
-    is common under Census's normal server strain and often succeeds on a
+    geocode_batch() wrapped with a small retry loop for transient failures
+    (timeouts, connection resets, 5xx) -- the Census batch endpoint is
+    known to occasionally choke on a request that would succeed on a
     second attempt a few seconds later -- retrying here means one bad
     moment doesn't immediately dump 20+ addresses down to the slower/
     less-accurate Nominatim fallback. Backoff increases with each retry
@@ -468,16 +547,8 @@ def reverse_geocode_geography(lat, lon):
             result["state"] = states[0].get("STUSAB", "")
 
         #
-        # County
-        #
-        counties = geographies.get("Counties", [])
-        if counties:
-            county_name = counties[0].get("NAME", "")
-            #if it ends with County, Stripe the county... So Middlesex County becomes Middlesex
-            result["county"] = re.sub(r"\s+County$", "", county_name, flags=re.IGNORECASE)
-
-        #
-        # Municipality
+        # Municipality (resolved before County -- CT's county lookup below
+        # depends on it)
         #
         subdivisions = geographies.get("County Subdivisions", [])
 
@@ -492,6 +563,26 @@ def reverse_geocode_geography(lat, lon):
             )
 
             result["municipality"] = municipality
+
+        #
+        # County
+        #
+        if result["state"] == "CT":
+            # Census's Counties layer returns Councils of Government /
+            # Planning Regions for CT, not traditional counties (e.g.
+            # "Naugatuck Valley Planning Region") -- see CT_COUNTY_BY_TOWN
+            # above for why that can't be fixed with a simple string
+            # transform. Resolve from the municipality just extracted
+            # instead. Falls back to "" (not the Planning Region name) if
+            # the municipality isn't in the table, so a gap is visible
+            # rather than silently showing the wrong kind of geography.
+            result["county"] = CT_COUNTY_BY_TOWN.get(result["municipality"], "")
+        else:
+            counties = geographies.get("Counties", [])
+            if counties:
+                county_name = counties[0].get("NAME", "")
+                #if it ends with County, Stripe the county... So Middlesex County becomes Middlesex
+                result["county"] = re.sub(r"\s+County$", "", county_name, flags=re.IGNORECASE)
 
         return result
 
