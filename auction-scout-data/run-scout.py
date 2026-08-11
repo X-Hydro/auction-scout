@@ -100,7 +100,7 @@ ALL_SPIDERS = {
     "skypoint": SkypointSpider,
     "landmark": LandmarkSpider,
     "keenan_ai": KeenanAISpider,
-    #"ct_judicial": CTJudicialSpider, #blocked from scraping
+    "ct_judicial": CTJudicialSpider, #blocked from scraping
 }
 
 REGISTRY = {

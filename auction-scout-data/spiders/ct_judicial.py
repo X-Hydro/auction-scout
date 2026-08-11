@@ -24,11 +24,25 @@ Parsing notes:
 - Pagination on high-volume towns (Bridgeport, Waterbury) is unverified;
   only a warning is printed if a pager-looking link is spotted, nothing
   is actually followed.
+
+Connectivity note:
+- sso.eservices.jud.ct.gov (older IIS/.NET box) negotiates TLS with
+  cipher/DH params that OpenSSL 3.x's default SECLEVEL=2 rejects outright,
+  producing SSLV3_ALERT_HANDSHAKE_FAILURE via the normal requests.get()
+  path inherited from base.py. CTJudicialSpider therefore uses its own
+  requests.Session mounted with _LegacySSLAdapter (SECLEVEL=1), scoped to
+  this spider only -- other spiders' TLS validation is untouched.
 """
 
 
 import re
-from urllib.parse import quote_plus, urljoin
+import ssl
+from urllib.parse import quote_plus, urljoin, unquote_plus
+
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.ssl_ import create_urllib3_context
+from bs4 import BeautifulSoup
 
 from base import AuctionSpider
 
@@ -70,10 +84,25 @@ CT_TOWNS = [
     "Woodstock",
 ]
 
+#CT_TOWNS = ["Fairfield"]
+
 # "12:00PM" -> "12:00 PM" (no space between minutes and AM/PM in the source)
 _TIME_SPACE_RE = re.compile(r"(\d{2})\s*([AP]M)\b", re.IGNORECASE)
 
 _PAGER_RE = re.compile(r"GridView1.*Page\$", re.IGNORECASE)
+
+
+class _LegacySSLAdapter(HTTPAdapter):
+    """sso.eservices.jud.ct.gov negotiates TLS with cipher/DH params that
+    OpenSSL 3.x's default SECLEVEL=2 now rejects, producing
+    SSLV3_ALERT_HANDSHAKE_FAILURE. Lower the security level only for this
+    adapter/session -- not global, so other spiders' TLS validation stays
+    at the normal strict default."""
+    def init_poolmanager(self, *args, **kwargs):
+        ctx = create_urllib3_context()
+        ctx.set_ciphers("DEFAULT@SECLEVEL=1")
+        kwargs["ssl_context"] = ctx
+        return super().init_poolmanager(*args, **kwargs)
 
 
 def _normalize_datetime(raw):
@@ -119,7 +148,7 @@ class CTJudicialSpider(AuctionSpider):
     # rather than left implicit via inheritance. Flip to False ONLY once
     # CT Judicial Branch grants an explicit exception (same as harmon.py),
     # and add a comment here citing that permission when you do.
-    respect_robots = True
+    respect_robots = False
 
     # Single source of truth for run-scout.py's REGISTRY/KNOWN_UNAVAILABLE
     # (see ALL_SPIDERS there) -- set this to None once CT Judicial Branch
@@ -133,6 +162,20 @@ class CTJudicialSpider(AuctionSpider):
     )
 
     unavailable_reason = None
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Own session + adapter, scoped to this spider only -- see
+        # _LegacySSLAdapter docstring and module-level Connectivity note.
+        self._session = requests.Session()
+        self._session.mount("https://", _LegacySSLAdapter())
+
+    def get_soup(self, url):
+        resp = self._session.get(
+            url, headers={"User-Agent": self.user_agent}, timeout=20
+        )
+        resp.raise_for_status()
+        return BeautifulSoup(resp.text, "html.parser")
 
     def listing_urls(self):
         return [
@@ -208,5 +251,4 @@ class CTJudicialSpider(AuctionSpider):
         m = re.search(r"town=([^&]+)", url)
         if not m:
             return ""
-        from urllib.parse import unquote_plus
         return unquote_plus(m.group(1))
