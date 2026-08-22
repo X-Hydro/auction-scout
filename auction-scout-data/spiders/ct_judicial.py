@@ -19,11 +19,22 @@ Parsing notes:
   "<town>, CT [ZIP]" pattern off the END of the string instead of
   guessing a comma rule -- correctly handles the town name also appearing
   earlier in the street (e.g. "781 Fairfield Beach Road, Fairfield CT").
-- No sample of a postponed/canceled listing exists -- status is hardcoded
-  "active".
 - Pagination on high-volume towns (Bridgeport, Waterbury) is unverified;
   only a warning is printed if a pager-looking link is spotted, nothing
   is actually followed.
+- Cancellation status is NOT available on the town listing page (no
+  status column exists in GridView1) -- confirmed via a real cancelled
+  posting (PostingId=61308, Middletown) that the listing row looks
+  identical to an active one. The only place it appears is the detail
+  page, in <span id="ctl00_cphBody_lblStatus">This Sale is Cancelled.</span>.
+  So scrape_details=True (base.py's default) and parse_detail() below
+  fetches each listing's own detail page (same URL already captured as
+  notice_link -> row["url"]) and overrides status to "cancelled" when
+  that span says so. This roughly 2-3x's the request count per run
+  (169 town pages + one detail fetch per pending sale) -- acceptable
+  under base.py's default request_delay=1.0s pacing and scraped_cache
+  (1-day freshness), but worth knowing if a run starts taking
+  noticeably longer.
 
 Connectivity note:
 - sso.eservices.jud.ct.gov (older IIS/.NET box) negotiates TLS with
@@ -91,6 +102,12 @@ _TIME_SPACE_RE = re.compile(r"(\d{2})\s*([AP]M)\b", re.IGNORECASE)
 
 _PAGER_RE = re.compile(r"GridView1.*Page\$", re.IGNORECASE)
 
+# Matches the detail page's #ctl00_cphBody_lblStatus text when a sale has
+# been cancelled (confirmed real text: "This Sale is Cancelled."). Loose
+# substring match rather than an exact string, since the trailing
+# punctuation/capitalization isn't confirmed stable across postings.
+_CANCELLED_RE = re.compile(r"cancel", re.IGNORECASE)
+
 
 class _LegacySSLAdapter(HTTPAdapter):
     """sso.eservices.jud.ct.gov negotiates TLS with cipher/DH params that
@@ -141,7 +158,13 @@ def _split_address(text, town):
 class CTJudicialSpider(AuctionSpider):
     name = "ct_judicial"
     base_url = "https://sso.eservices.jud.ct.gov/foreclosures/Public"
-    scrape_details = False  # town listing page already has everything we need
+    # Explicit even though True is AuctionSpider's default -- left implicit
+    # here once already (as scrape_details=False) and that silently caused
+    # this exact cancelled-listing bug, so now it's stated outright rather
+    # than relying on inheritance. See module docstring and parse_detail()
+    # below: the town listing page has everything EXCEPT cancellation
+    # status, which only exists on each listing's own detail page.
+    scrape_details = True
 
     # Explicit even though True is AuctionSpider's default -- this is the
     # one flag that matters most for this spider, so it's stated here
@@ -245,6 +268,18 @@ class CTJudicialSpider(AuctionSpider):
             })
 
         return rows
+
+    def parse_detail(self, soup, row):
+        """Read #ctl00_cphBody_lblStatus off the detail page to catch
+        cancelled sales -- the town listing page (parse_listing above) has
+        no status column at all, so this is the only place it's available.
+        Returns {} (no override) for an active sale, since parse_listing()
+        already set status="active" and base.py's scrape() merges this
+        dict on top via row.update() -- only need to send what changes."""
+        status_span = soup.select_one("#ctl00_cphBody_lblStatus")
+        if status_span and _CANCELLED_RE.search(status_span.get_text(strip=True)):
+            return {"status": "cancelled"}
+        return {}
 
     @staticmethod
     def _town_from_url(url):

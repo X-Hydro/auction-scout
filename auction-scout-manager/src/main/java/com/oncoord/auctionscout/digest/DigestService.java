@@ -4,6 +4,7 @@ import com.oncoord.auctionscout.notification.NotificationRepository;
 import com.oncoord.auctionscout.properties.PropertyDigestRepository;
 import com.oncoord.auctionscout.properties.PropertyDigestRepository.ChangedListing;
 import com.oncoord.auctionscout.properties.PropertyDigestRepository.UpcomingListing;
+import com.oncoord.auctionscout.saved.SavedPropertiesRepository;
 import com.oncoord.auctionscout.subscriber.SubscriberRepository;
 import com.oncoord.auth.common.TokenService;
 import org.springframework.beans.factory.annotation.Value;
@@ -16,6 +17,8 @@ import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Renders the weekly digest HTML — same structure/CSS as
@@ -75,19 +78,39 @@ public class DigestService {
     private final PropertyDigestRepository repository;
     private final SubscriberRepository subscribers;
     private final NotificationRepository notifications;
+    private final SavedPropertiesRepository savedProperties;
     private final TokenService tokenService;
     private final String appBaseUrl;
 
     public DigestService(PropertyDigestRepository repository,
                          SubscriberRepository subscribers,
                          NotificationRepository notifications,
+                         SavedPropertiesRepository savedProperties,
                          TokenService tokenService,
                          @Value("${auctionscout.app.base-url}") String appBaseUrl) {
         this.repository = repository;
         this.subscribers = subscribers;
         this.notifications = notifications;
+        this.savedProperties = savedProperties;
         this.tokenService = tokenService;
         this.appBaseUrl = appBaseUrl;
+    }
+
+    /**
+     * Property IDs this subscriber has saved, or empty if email is null
+     * (anonymous callers, unit tests). Saved properties bypass the
+     * seasoning gate in filterActiveListings()/buildChangeGroups() --
+     * see their javadocs -- so a subscriber never misses activity on
+     * something they explicitly chose to track just because it's new
+     * to the scraper.
+     */
+    private Set<Long> savedPropertyIdsFor(String email) {
+        if (email == null) {
+            return Set.of();
+        }
+        return savedProperties.findByEmail(email).stream()
+                .map(SavedPropertiesRepository.SavedProperty::propertyId)
+                .collect(Collectors.toSet());
     }
 
     /**
@@ -163,7 +186,8 @@ public class DigestService {
      */
     public String render(String email, List<String> states, OffsetDateTime changesSince, boolean truncate) {
         LocalDateTime now = LocalDateTime.now();
-        List<UpcomingListing> upcoming = filterActiveListings(repository.findActive(states, now));
+        Set<Long> savedPropertyIds = savedPropertyIdsFor(email);
+        List<UpcomingListing> upcoming = filterActiveListings(repository.findActive(states, now), savedPropertyIds);
         List<ChangedListing> changes = repository.findRecentChanges(states, changesSince);
 
         // Only mint a view token for a real send (truncate=true, real
@@ -206,7 +230,7 @@ public class DigestService {
                 """.formatted(
                 now.format(DateTimeFormatter.ofPattern("MMMM d, yyyy", Locale.US)),
                 renderUpcoming(upcoming, truncate, statusUrl(states, viewToken)),
-                renderChanges(buildChangeGroups(changes, email, true), truncate, statusUrl(states, viewToken)),
+                renderChanges(buildChangeGroups(changes, email, true, savedPropertyIds), truncate, statusUrl(states, viewToken)),
                 PREFERENCES_LINK_PLACEHOLDER,
                 PREFERENCES_LINK_PLACEHOLDER
         );
@@ -230,7 +254,7 @@ public class DigestService {
      */
     public String renderSavedPropertyAlert(String email, List<Long> propertyIds, OffsetDateTime since) {
         List<ChangedListing> changes = repository.findRecentChangesForProperties(propertyIds, since);
-        List<ChangeGroup> groups = buildChangeGroups(changes, email, true);
+        List<ChangeGroup> groups = buildChangeGroups(changes, email, true, Set.copyOf(propertyIds));
         if (groups.isEmpty()) {
             return null;
         }
@@ -249,7 +273,7 @@ public class DigestService {
     public String renderSavedPropertyAlertForTest(String email, List<Long> propertyIds, OffsetDateTime since,
                                                   OffsetDateTime lastRealSentAt) {
         List<ChangedListing> changes = repository.findRecentChangesForProperties(propertyIds, since);
-        List<ChangeGroup> groups = buildChangeGroups(changes, email, true);
+        List<ChangeGroup> groups = buildChangeGroups(changes, email, true, Set.copyOf(propertyIds));
         return wrapSavedPropertyAlert(email, groups, true, lastRealSentAt);
     }
 
@@ -447,8 +471,18 @@ public class DigestService {
      *              unconditionally, same as every other category —
      *              there's no equivalent risk of surprise when
      *              someone's actively looking at the page right now.
+     * @param savedPropertyIds property IDs this subscriber has saved —
+     *              these bypass the isSeasoned() check below (but not
+     *              the removal-notification gate, and not the terminal-
+     *              status/date-cap rules that live in
+     *              filterActiveListings() instead). A saved property is
+     *              something the subscriber explicitly chose to track,
+     *              so "not enough scraper history yet" shouldn't hide
+     *              activity on it the way it does for the general feed.
      */
-    private List<ChangeGroup> buildChangeGroups(List<ChangedListing> changes, String email, boolean gateRemovedOnNotificationHistory) {
+    private List<ChangeGroup> buildChangeGroups(List<ChangedListing> changes, String email,
+                                                boolean gateRemovedOnNotificationHistory,
+                                                Set<Long> savedPropertyIds) {
         // Group by address so a property with multiple events this
         // window collapses into one entry with combined labels, not one
         // entry per event.
@@ -478,7 +512,10 @@ public class DigestService {
             // could bypass a narrower check, and an unseasoned property
             // could later surface as an unexplained Removed in a
             // different window where its first_seen isn't in view.
-            if (!isSeasoned(first.auctionDateTime(), first.firstSeenAt(), first.lastSeenAt())) {
+            // Saved properties skip this gate entirely -- see
+            // savedPropertyIds javadoc above.
+            boolean isSaved = savedPropertyIds.contains(first.propertyId());
+            if (!isSaved && !isSeasoned(first.auctionDateTime(), first.firstSeenAt(), first.lastSeenAt())) {
                 continue;
             }
 
@@ -581,15 +618,20 @@ public class DigestService {
      * it matters); inside that cap, seasoning is required unless the
      * auction is within URGENCY_WAIVER_DAYS, in which case it's shown
      * regardless -- better a little noise than missing something
-     * happening soon.
+     * happening soon. A property in savedPropertyIds also bypasses the
+     * seasoning requirement (same reasoning as buildChangeGroups' param
+     * of the same name) but NOT the dateless/terminal-status/30-day-cap
+     * filters -- those aren't about scraper confidence, so saving a
+     * property doesn't change whether they should apply.
      */
-    private List<UpcomingListing> filterActiveListings(List<UpcomingListing> listings) {
+    private List<UpcomingListing> filterActiveListings(List<UpcomingListing> listings, Set<Long> savedPropertyIds) {
         LocalDateTime now = LocalDateTime.now();
         return listings.stream()
                 .filter(l -> l.auctionDateTime() != null)
                 .filter(l -> !isTerminalStatus(l.status()))
                 .filter(l -> l.auctionDateTime().isBefore(now.plusDays(ACTIVE_LISTING_CAP_DAYS)))
-                .filter(l -> isSeasoned(l.auctionDateTime(), l.firstSeenAt(), l.lastSeenAt())
+                .filter(l -> savedPropertyIds.contains(l.propertyId())
+                        || isSeasoned(l.auctionDateTime(), l.firstSeenAt(), l.lastSeenAt())
                         || l.auctionDateTime().isBefore(now.plusDays(URGENCY_WAIVER_DAYS)))
                 .toList();
     }
@@ -827,7 +869,8 @@ public class DigestService {
     private DigestData renderAsData(List<String> states, String email, OffsetDateTime changesSince) {
         LocalDateTime now = LocalDateTime.now();
 
-        List<UpcomingListing> upcoming = filterActiveListings(repository.findActive(states, now));
+        Set<Long> savedPropertyIds = savedPropertyIdsFor(email);
+        List<UpcomingListing> upcoming = filterActiveListings(repository.findActive(states, now), savedPropertyIds);
         List<UpcomingRow> upcomingRows = upcoming.stream()
                 .map(l -> new UpcomingRow(
                         l.propertyId(),
@@ -842,7 +885,7 @@ public class DigestService {
                 .toList();
 
         List<ChangedListing> changes = repository.findRecentChanges(states, changesSince);
-        List<ChangeRow> changeRows = buildChangeGroups(changes, email, /* gateRemovedOnNotificationHistory */ false).stream()
+        List<ChangeRow> changeRows = buildChangeGroups(changes, email, /* gateRemovedOnNotificationHistory */ false, savedPropertyIds).stream()
                 .map(g -> new ChangeRow(
                         g.listing().propertyId(),
                         g.listing().state(),

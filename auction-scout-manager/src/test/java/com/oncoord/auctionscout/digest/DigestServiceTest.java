@@ -3,6 +3,7 @@ package com.oncoord.auctionscout.digest;
 import com.oncoord.auctionscout.notification.NotificationRepository;
 import com.oncoord.auctionscout.properties.PropertiesDbConnectionManager;
 import com.oncoord.auctionscout.properties.PropertyDigestRepository;
+import com.oncoord.auctionscout.saved.SavedPropertiesRepository;
 import com.oncoord.auctionscout.subscriber.SubscriberRepository;
 import com.oncoord.auctionscout.testsupport.PropertyDigestTestData;
 import com.oncoord.auth.common.TokenRecord;
@@ -150,7 +151,15 @@ class DigestServiceTest {
         // oncoord-auth-common) since it's a third-party library class,
         // not something backed by this test's own JdbcTemplate.
         SubscriberRepository subscribers = new SubscriberRepository(managerJdbc);
-        digestService = new DigestService(repository, subscribers, notifications, new TokenService(new InMemoryTokenStore()), "https://oncoord.com");
+        // Backs savedPropertyIdsFor(email) -- the seasoning-gate bypass
+        // for a subscriber's saved properties (see DigestService's
+        // javadoc on that method). Real, JdbcTemplate-backed, same
+        // shape as NotificationRepository/SubscriberRepository above --
+        // no fixture data needed for tests that don't save anything,
+        // since findByEmail() just returns an empty list.
+        SavedPropertiesRepository savedProperties = new SavedPropertiesRepository(managerJdbc);
+        digestService = new DigestService(repository, subscribers, notifications, savedProperties,
+                new TokenService(new InMemoryTokenStore()), "https://oncoord.com");
     }
 
     /**
@@ -212,6 +221,23 @@ class DigestServiceTest {
         managerJdbc.update(
                 "INSERT INTO email_notifications (email, notification_type, sent_at) VALUES (?, 'weekly', ?)",
                 email, sentAt.toInstant().toEpochMilli());
+    }
+
+    /**
+     * Inserts a saved_properties row directly via managerJdbc, same
+     * pattern as recordNotificationSentAt above -- bypasses
+     * SavedPropertiesRepository.save() (which needs a full
+     * PropertyDigestRepository.PropertyDetails) since these tests only
+     * need the (email, property_id) pair to exist for
+     * savedPropertyIdsFor() to pick it up. address/state are denormalized
+     * copies per the real save() call, but nothing here reads them back
+     * -- only property_id is consulted by the seasoning bypass.
+     */
+    private void recordSavedProperty(String email, long propertyId, String address, String state) {
+        managerJdbc.update(
+                "INSERT INTO saved_properties (email, property_id, address_raw, state, county, municipality, latitude, longitude, saved_at) " +
+                        "VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, ?)",
+                email, propertyId, address, state, OffsetDateTime.now().toString());
     }
 
 
@@ -1098,7 +1124,85 @@ class DigestServiceTest {
         assertTrue(html.contains("No status changes to report this week."));
     }
 
-    // ---- Upcoming Auctions: the 8-29 day gap ----------------------------
+    // ---- Saved properties bypass the seasoning gate ----------------------
+    //
+    // A subscriber explicitly saving a property is a stronger signal
+    // than the scraper's own re-confirmation history -- these mirror
+    // the suppression tests directly above, with the one difference
+    // being that the property is saved, to confirm savedPropertyIds
+    // actually flips the outcome and isn't just threaded through
+    // unused.
+
+    @Test
+    void render_showsSavedProperty_asNew_evenWhenFarOutAndUnseasoned() {
+        long propertyId = testData.property()
+                .address("6 Foxglove Lane, Nashua, NH")
+                .state("NH")
+                .firstSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .auctionDatetime("2026-09-15T10:00:00") // well beyond the 7-day window
+                .insert();
+        testData.event(auctionId, "first_seen")
+                .newValue("active")
+                .insert();
+        recordSavedProperty(TEST_EMAIL, propertyId, "6 Foxglove Lane, Nashua, NH", "NH");
+
+        String html = digestService.render(
+                TEST_EMAIL,
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertTrue(html.contains("6 Foxglove Lane, Nashua, NH"),
+                "far out and unseasoned, but explicitly saved -- should announce despite the seasoning gate");
+        assertTrue(html.contains("class='tag'>New<"));
+    }
+
+    @Test
+    void render_stillSuppressesUnseasoned_whenPropertyIsNotSaved_evenWithEmailPresent() {
+        // Companion/guard: confirms the bypass is scoped to the specific
+        // saved property ID, not "any request with an email attached
+        // skips seasoning." A second, unsaved property in the exact same
+        // window must still be suppressed.
+        long savedPropertyId = testData.property()
+                .address("7 Foxglove Lane, Nashua, NH")
+                .state("NH")
+                .firstSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .insert();
+        long unsavedPropertyId = testData.property()
+                .address("8 Foxglove Lane, Nashua, NH")
+                .state("NH")
+                .firstSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .insert();
+        long savedAuctionId = testData.auction(savedPropertyId)
+                .auctionDatetime("2026-09-15T10:00:00")
+                .insert();
+        long unsavedAuctionId = testData.auction(unsavedPropertyId)
+                .auctionDatetime("2026-09-15T10:00:00")
+                .insert();
+        testData.event(savedAuctionId, "first_seen").newValue("active").insert();
+        testData.event(unsavedAuctionId, "first_seen").newValue("active").insert();
+        recordSavedProperty(TEST_EMAIL, savedPropertyId, "7 Foxglove Lane, Nashua, NH", "NH");
+
+        String html = digestService.render(
+                TEST_EMAIL,
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertTrue(html.contains("7 Foxglove Lane, Nashua, NH"),
+                "the saved property should still bypass seasoning");
+        assertFalse(html.contains("8 Foxglove Lane, Nashua, NH"),
+                "an unsaved property in the same window must remain gated by seasoning");
+    }
+
+
     //
     // The old "Auctions in the Next 7 Days" section was a flat 7-day
     // window with NO seasoning check at all -- nothing past 7 days out
@@ -1168,6 +1272,37 @@ class DigestServiceTest {
 
         assertFalse(html.contains("88 Windward Lane, Portsmouth, NH"),
                 "unseasoned listing 15 days out is still noise -- the gap fix must not bypass seasoning entirely");
+    }
+
+    @Test
+    void render_showsSavedUnseasonedAuction_inGapWindow_inUpcomingAuctions() {
+        // Companion to the pair above: same 8-29 day gap, zero confirmed
+        // history, but this one is saved -- should appear in Upcoming
+        // Auctions despite being unseasoned, same bypass as the Status
+        // Changes section.
+        String auctionDateTime = LocalDateTime.now().withNano(0).plusDays(15).toString();
+
+        long propertyId = testData.property()
+                .address("99 Windward Lane, Portsmouth, NH")
+                .state("NH")
+                .firstSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .insert();
+        testData.auction(propertyId)
+                .auctionDatetime(auctionDateTime)
+                .sourceUrl("https://example.com/listing/7003")
+                .insert();
+        recordSavedProperty(TEST_EMAIL, propertyId, "99 Windward Lane, Portsmouth, NH", "NH");
+
+        String html = digestService.render(
+                TEST_EMAIL,
+                List.of("NH"),
+                OffsetDateTime.now().minusYears(1),
+                false
+        );
+
+        assertTrue(html.contains("99 Windward Lane, Portsmouth, NH"),
+                "a saved listing 15 days out should appear in Upcoming Auctions even with zero confirmed history");
     }
 
     // ---- Saved-property alert: status_change events (fixed) --------------
@@ -1241,6 +1376,44 @@ class DigestServiceTest {
 
         assertNull(html,
                 "a non-terminal status_change (active) is noise, not something a saved-property subscriber needs to act on");
+    }
+
+    // ---- Saved-property alert bypasses seasoning too ----------------------
+    //
+    // renderSavedPropertyAlert()/renderSavedPropertyAlertForTest() get
+    // their "saved" set directly from the propertyIds argument -- every
+    // ID passed in is by definition something this subscriber saved, so
+    // seasoning should never suppress a row here, unlike the general
+    // weekly digest which only bypasses IDs actually in saved_properties.
+
+    @Test
+    void renderSavedPropertyAlert_includesFarOutUnseasonedProperty() {
+        long propertyId = testData.property()
+                .address("11 Quarry Road, Nashua, NH")
+                .state("NH")
+                .firstSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .auctionDatetime("2026-09-15T10:00:00") // well beyond the 7-day window
+                .insert();
+        testData.event(auctionId, "date_change")
+                .oldValue("2026-09-01T10:00:00")
+                .newValue("2026-09-15T10:00:00")
+                .detectedAt("2026-07-14T09:00:00.000000+00:00")
+                .insert();
+
+        String html = digestService.renderSavedPropertyAlert(
+                TEST_EMAIL,
+                List.of(propertyId),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00")
+        );
+
+        assertNotNull(html,
+                "a saved property should generate an alert even far out and unseasoned -- "
+                        + "the alert's whole input list is inherently the saved set");
+        assertTrue(html.contains("11 Quarry Road, Nashua, NH"));
+        assertTrue(html.contains("2026-09-01 → 2026-09-15"));
     }
 
 }
