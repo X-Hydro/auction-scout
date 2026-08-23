@@ -86,6 +86,14 @@ public class StatusController {
      * links now carry a ?vt= view token (DigestService.statusUrl) that
      * this endpoint resolves via TokenService.peek(token, ttl) below,
      * independent of any session.
+     *
+     * subscriberEmail, once resolved, is also passed through to
+     * DigestService.renderAsData() so that subscriber's saved
+     * properties bypass the seasoning/30-day-cap gates here the same
+     * way they do in the weekly email (see
+     * DigestService.savedPropertyIdsFor()) -- without it, a saved
+     * property renders fine in the weekly email but silently doesn't
+     * appear on this page.
      */
     @GetMapping(value = "/status/data", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<?> getStatusData(
@@ -143,7 +151,8 @@ public class StatusController {
             ));
         }
 
-        DigestService.DigestData data = digestService.renderAsData(stateList, OffsetDateTime.now().minusDays(7));
+        DigestService.DigestData data = digestService.renderAsData(
+                stateList, subscriberEmail.orElse(null), OffsetDateTime.now().minusDays(7));
         return ResponseEntity.ok(data);
     }
 }

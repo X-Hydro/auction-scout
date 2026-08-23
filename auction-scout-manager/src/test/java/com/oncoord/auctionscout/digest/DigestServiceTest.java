@@ -1305,6 +1305,68 @@ class DigestServiceTest {
                 "a saved listing 15 days out should appear in Upcoming Auctions even with zero confirmed history");
     }
 
+    @Test
+    void render_showsSavedAuction_inUpcomingAuctions_evenBeyondThe30DayCap() {
+        // Real-world regression: a saved property whose auction is more
+        // than ACTIVE_LISTING_CAP_DAYS (30) out was still being dropped
+        // from Upcoming Auctions even after the seasoning bypass, because
+        // the 30-day cap is a separate filter that wasn't bypassed too.
+        // "far out" was explicitly part of the original ask -- this
+        // covers it directly, seasoned or not.
+        String auctionDateTime = LocalDateTime.now().withNano(0).plusDays(60).toString();
+
+        long propertyId = testData.property()
+                .address("33 Elm Street, Newport, RI")
+                .state("RI")
+                // Seasoned (default fixture history is well past 7 days) --
+                // isolates this test to the cap, not seasoning.
+                .insert();
+        testData.auction(propertyId)
+                .auctionDatetime(auctionDateTime)
+                .sourceUrl("https://example.com/listing/9001")
+                .insert();
+        recordSavedProperty(TEST_EMAIL, propertyId, "33 Elm Street, Newport, RI", "RI");
+
+        String html = digestService.render(
+                TEST_EMAIL,
+                List.of("RI"),
+                OffsetDateTime.now().minusYears(1),
+                false
+        );
+
+        assertTrue(html.contains("33 Elm Street, Newport, RI"),
+                "a saved auction 60 days out should still appear in Upcoming Auctions -- "
+                        + "the 30-day cap must not suppress a property the subscriber explicitly saved");
+    }
+
+    @Test
+    void render_stillSuppressesUnsavedAuction_beyondThe30DayCap() {
+        // Guard: confirms the cap bypass is scoped to saved properties,
+        // not loosened for everyone once any saved property exists.
+        String auctionDateTime = LocalDateTime.now().withNano(0).plusDays(60).toString();
+
+        long propertyId = testData.property()
+                .address("34 Elm Street, Newport, RI")
+                .state("RI")
+                .insert();
+        testData.auction(propertyId)
+                .auctionDatetime(auctionDateTime)
+                .sourceUrl("https://example.com/listing/9002")
+                .insert();
+
+        String html = digestService.render(
+                TEST_EMAIL,
+                List.of("RI"),
+                OffsetDateTime.now().minusYears(1),
+                false
+        );
+
+        assertFalse(html.contains("34 Elm Street, Newport, RI"),
+                "an unsaved auction 60 days out should remain capped -- too likely to be postponed before it matters");
+    }
+
+
+
     // ---- Saved-property alert: status_change events (fixed) --------------
     //
     // PropertyDigestRepository.findRecentChangesForProperties()'s
@@ -1414,6 +1476,70 @@ class DigestServiceTest {
                         + "the alert's whole input list is inherently the saved set");
         assertTrue(html.contains("11 Quarry Road, Nashua, NH"));
         assertTrue(html.contains("2026-09-01 → 2026-09-15"));
+    }
+
+    // ---- renderAsData: the status.html JSON path has its own wiring -------
+    //
+    // render() and renderAsData() are two separate methods that both
+    // call buildChangeGroups()/filterActiveListings() -- passing an
+    // email into one doesn't automatically mean the other received it.
+    // StatusController.getStatusData() resolves a subscriber email
+    // independently and has to thread it into renderAsData() itself;
+    // this caught a real bug where that resolved email was computed
+    // (for the entitlement check) but never actually passed through,
+    // so the status page silently never got the seasoning bypass render()
+    // already had.
+
+    @Test
+    void renderAsData_includesSavedProperty_asNew_evenWhenFarOutAndUnseasoned() {
+        long propertyId = testData.property()
+                .address("12 Foxglove Lane, Nashua, NH")
+                .state("NH")
+                .firstSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .auctionDatetime("2026-09-15T10:00:00")
+                .insert();
+        testData.event(auctionId, "first_seen")
+                .newValue("active")
+                .insert();
+        recordSavedProperty(TEST_EMAIL, propertyId, "12 Foxglove Lane, Nashua, NH", "NH");
+
+        DigestService.DigestData data = digestService.renderAsData(
+                List.of("NH"), TEST_EMAIL, OffsetDateTime.parse("2026-07-01T00:00:00+00:00"));
+
+        boolean found = data.changes().stream()
+                .anyMatch(c -> c.address().equals("12 Foxglove Lane, Nashua, NH") && c.labels().contains("New"));
+        assertTrue(found,
+                "a saved property should appear via renderAsData (the status page's JSON source) "
+                        + "even far out and unseasoned -- this is the exact path StatusController.getStatusData() calls");
+    }
+
+    @Test
+    void renderAsData_omitsUnseasonedProperty_whenEmailIsNull() {
+        // Guard for the anonymous 2-arg overload some callers may still
+        // use: with no email at all, there's no saved set to bypass
+        // seasoning with, so the property must still be suppressed.
+        long propertyId = testData.property()
+                .address("13 Foxglove Lane, Nashua, NH")
+                .state("NH")
+                .firstSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .auctionDatetime("2026-09-15T10:00:00")
+                .insert();
+        testData.event(auctionId, "first_seen")
+                .newValue("active")
+                .insert();
+
+        DigestService.DigestData data = digestService.renderAsData(
+                List.of("NH"), OffsetDateTime.parse("2026-07-01T00:00:00+00:00"));
+
+        boolean found = data.changes().stream()
+                .anyMatch(c -> c.address().equals("13 Foxglove Lane, Nashua, NH"));
+        assertFalse(found, "with no subscriber context there's no saved set to bypass seasoning with");
     }
 
 }

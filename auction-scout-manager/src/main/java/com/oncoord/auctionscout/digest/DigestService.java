@@ -608,28 +608,31 @@ public class DigestService {
 
     /**
      * The eligibility rule for "Upcoming Auctions" (email and status
-     * page both use this): dateless listings are always suppressed;
-     * a terminal-status listing (cancel/sold/third-party -- see
-     * isTerminalStatus(), same check the Changes pipeline already uses)
-     * is suppressed regardless of its date, since a stale future
-     * auction_datetime on a cancelled listing is exactly the case this
-     * exists to catch; nothing beyond ACTIVE_LISTING_CAP_DAYS out is
-     * shown regardless of seasoning (too likely to be postponed before
-     * it matters); inside that cap, seasoning is required unless the
-     * auction is within URGENCY_WAIVER_DAYS, in which case it's shown
-     * regardless -- better a little noise than missing something
-     * happening soon. A property in savedPropertyIds also bypasses the
-     * seasoning requirement (same reasoning as buildChangeGroups' param
-     * of the same name) but NOT the dateless/terminal-status/30-day-cap
-     * filters -- those aren't about scraper confidence, so saving a
-     * property doesn't change whether they should apply.
+     * page both use this): dateless listings are always suppressed --
+     * there's no date to show them under, saved or not; a terminal-
+     * status listing (cancel/sold/third-party -- see isTerminalStatus(),
+     * same check the Changes pipeline already uses) is suppressed
+     * regardless of its date, since a stale future auction_datetime on
+     * a cancelled listing is exactly the case this exists to catch, and
+     * showing a saved-but-cancelled auction as "upcoming" would be
+     * actively wrong, not just noisy; inside ACTIVE_LISTING_CAP_DAYS,
+     * seasoning is required unless the auction is within
+     * URGENCY_WAIVER_DAYS, in which case it's shown regardless --
+     * better a little noise than missing something happening soon. A
+     * property in savedPropertyIds bypasses BOTH the seasoning
+     * requirement and the ACTIVE_LISTING_CAP_DAYS cap (same reasoning
+     * as buildChangeGroups' param of the same name -- a subscriber who
+     * explicitly saved something wants to see it regardless of how far
+     * out it is) but NOT the dateless/terminal-status filters, which
+     * aren't about distance or confidence at all.
      */
     private List<UpcomingListing> filterActiveListings(List<UpcomingListing> listings, Set<Long> savedPropertyIds) {
         LocalDateTime now = LocalDateTime.now();
         return listings.stream()
                 .filter(l -> l.auctionDateTime() != null)
                 .filter(l -> !isTerminalStatus(l.status()))
-                .filter(l -> l.auctionDateTime().isBefore(now.plusDays(ACTIVE_LISTING_CAP_DAYS)))
+                .filter(l -> savedPropertyIds.contains(l.propertyId())
+                        || l.auctionDateTime().isBefore(now.plusDays(ACTIVE_LISTING_CAP_DAYS)))
                 .filter(l -> savedPropertyIds.contains(l.propertyId())
                         || isSeasoned(l.auctionDateTime(), l.firstSeenAt(), l.lastSeenAt())
                         || l.auctionDateTime().isBefore(now.plusDays(URGENCY_WAIVER_DAYS)))
@@ -843,21 +846,27 @@ public class DigestService {
 
     /**
      * Structured, untruncated equivalent of render(states, changesSince,
-     * false) — status.html's data source, called with no subscriber
-     * context (see StatusController). Defers to the email-aware overload
-     * below with email=null.
+     * false), for a genuinely anonymous caller with no subscriber
+     * context at all. StatusController's real /status/data endpoint
+     * calls the email-aware overload below instead, once it's resolved
+     * whichever subscriber (if any) the request belongs to -- this
+     * overload remains for callers that truly have no email to pass.
      */
     public DigestData renderAsData(List<String> states, OffsetDateTime changesSince) {
         return renderAsData(states, null, changesSince);
     }
 
     /**
-     * @param email subscriber this is being built for, or null (the
-     *              status.html/CSV path always passes null today, since
-     *              StatusController doesn't resolve one -- kept as a
-     *              real parameter rather than dropped, since it's the
-     *              natural key for any future subscriber-specific
-     *              behavior on this data path).
+     * @param email subscriber this is being built for, or null for an
+     *              anonymous/unauthenticated caller. StatusController's
+     *              /status/data endpoint DOES resolve a subscriber email
+     *              when a session token or view token is present (see
+     *              its javadoc) and passes it through here -- this is
+     *              what lets savedPropertyIdsFor(email) bypass the
+     *              seasoning gate for that subscriber's saved properties
+     *              on the status page, same as the weekly email. Only a
+     *              genuinely anonymous visitor (no session, no view
+     *              token) gets null, and therefore no bypass.
      *
      * Removed items are shown unconditionally on this path regardless
      * of whether email is present -- gateRemovedOnNotificationHistory
@@ -866,7 +875,7 @@ public class DigestService {
      * saved-property alerts, via render()/renderSavedPropertyAlert());
      * see buildChangeGroups.
      */
-    private DigestData renderAsData(List<String> states, String email, OffsetDateTime changesSince) {
+    public DigestData renderAsData(List<String> states, String email, OffsetDateTime changesSince) {
         LocalDateTime now = LocalDateTime.now();
 
         Set<Long> savedPropertyIds = savedPropertyIdsFor(email);
