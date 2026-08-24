@@ -237,16 +237,20 @@ public class DigestService {
     }
 
     /**
-     * Renders the daily saved-property alert email -- Date Changes and
-     * Removed sections only, for an explicit list of property IDs
-     * rather than a subscriber's state list. Reuses
+     * Renders the daily saved-property alert email -- New Listings,
+     * Date Changes, and Removed sections, for an explicit list of
+     * property IDs rather than a subscriber's state list. Reuses
      * buildChangeGroups()/changeRow()/appendChangeSection() as-is:
      * since the caller (SavedPropertyAlertService) sources its input
-     * from findRecentChangesForProperties(), which already restricts
-     * to date_change/disappeared events, the shared grouping logic
-     * naturally never produces "New" or generic "Status Changes"
-     * groups from this input -- no extra category filtering needed
-     * here. Always gates Removed against notification history (this is
+     * from findRecentChangesForProperties(), which restricts to
+     * date_change/disappeared/status_change/first_seen events, the
+     * shared grouping logic naturally never produces a generic "Status
+     * Changes" group from this input (status_change only ever
+     * contributes to "Removed" here) -- no extra category filtering
+     * needed for that one. "New" groups DO show up now (first_seen is
+     * in scope -- see PropertyDigestRepository.findRecentChangesForProperties()
+     * javadoc) and are bucketed separately in wrapSavedPropertyAlert().
+     * Always gates Removed against notification history (this is
      * always a real email send) -- see buildChangeGroups.
      *
      * @return null if there's nothing to report -- caller should skip
@@ -278,6 +282,7 @@ public class DigestService {
     }
 
     private String wrapSavedPropertyAlert(String email, List<ChangeGroup> groups, boolean isTest, OffsetDateTime lastRealSentAt) {
+        List<String> newRows = new java.util.ArrayList<>();
         List<String> dateChangeRows = new java.util.ArrayList<>();
         List<String> removedRows = new java.util.ArrayList<>();
         for (ChangeGroup g : groups) {
@@ -306,18 +311,19 @@ public class DigestService {
                 labelsHtml = testTag + " " + labelsHtml;
             }
             String row = changeRow(g.listing(), dateText, labelsHtml, g.category());
-            if ("Removed".equals(g.category())) {
-                removedRows.add(row);
-            } else {
-                dateChangeRows.add(row);
+            switch (g.category()) {
+                case "New" -> newRows.add(row);
+                case "Removed" -> removedRows.add(row);
+                default -> dateChangeRows.add(row);
             }
         }
 
         StringBuilder sections = new StringBuilder();
+        appendChangeSection(sections, "New Listings", newRows, false);
         appendChangeSection(sections, "Date Changes", dateChangeRows, false);
         appendChangeSection(sections, "Removed", removedRows, false);
         if (sections.isEmpty()) {
-            sections.append("<p class='empty'>No recent date changes or removals on your saved properties.</p>");
+            sections.append("<p class='empty'>No recent updates on your saved properties.</p>");
         }
 
         String greetingName = escape(subscribers.findUsernameByEmail(email).filter(s -> !s.isBlank()).orElse("there"));

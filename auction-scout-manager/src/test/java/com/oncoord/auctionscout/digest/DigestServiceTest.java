@@ -1478,6 +1478,73 @@ class DigestServiceTest {
         assertTrue(html.contains("2026-09-01 → 2026-09-15"));
     }
 
+
+    @Test
+    void renderSavedPropertyAlert_includesFirstSeenOnly_asNewListing() {
+        long propertyId = testData.property()
+                .address("14 Quarry Road, Nashua, NH")
+                .state("NH")
+                .firstSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .auctionDatetime("2026-07-20T10:00:00")
+                .insert();
+        testData.event(auctionId, "first_seen")
+                .newValue("active")
+                .detectedAt("2026-07-14T09:00:00.000000+00:00")
+                .insert();
+
+        String html = digestService.renderSavedPropertyAlert(
+                TEST_EMAIL,
+                List.of(propertyId),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00")
+        );
+
+        assertNotNull(html,
+                "a saved property seen for the first time should generate an alert -- "
+                        + "the subscriber may have saved it without ever being emailed about it");
+        assertTrue(html.contains("14 Quarry Road, Nashua, NH"));
+        assertTrue(html.contains("New Listings"));
+        assertTrue(html.contains("class='tag'>New<"));
+    }
+
+    @Test
+    void renderSavedPropertyAlert_firstSeenWithDateChange_classifiesAsDateChanges_notNew() {
+        long propertyId = testData.property()
+                .address("15 Quarry Road, Nashua, NH")
+                .state("NH")
+                .firstSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .auctionDatetime("2026-08-01T10:00:00")
+                .insert();
+        testData.event(auctionId, "first_seen")
+                .newValue("active")
+                .detectedAt("2026-07-14T09:00:00.000000+00:00")
+                .insert();
+        testData.event(auctionId, "date_change")
+                .oldValue("2026-07-25T10:00:00")
+                .newValue("2026-08-01T10:00:00")
+                .detectedAt("2026-07-14T09:05:00.000000+00:00")
+                .insert();
+
+        String html = digestService.renderSavedPropertyAlert(
+                TEST_EMAIL,
+                List.of(propertyId),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00")
+        );
+
+        assertNotNull(html);
+        assertTrue(html.contains("15 Quarry Road, Nashua, NH"));
+        assertTrue(html.contains("Date Changes"),
+                "a first_seen riding alongside a date_change should classify as Date Changes, "
+                        + "not New -- same rule buildChangeGroups() already applies elsewhere");
+        assertFalse(html.contains("New Listings"),
+                "no other property in this alert is New-only, so the New Listings heading shouldn't render at all");
+    }
+
     // ---- renderAsData: the status.html JSON path has its own wiring -------
     //
     // render() and renderAsData() are two separate methods that both

@@ -272,17 +272,27 @@ public class PropertyDigestRepository {
     /**
      * Same shape as findRecentChanges, but scoped to an explicit list of
      * property IDs rather than states, and restricted to
-     * date_change/disappeared/status_change events only -- backs the
-     * daily saved-property alert (date changes and removals), not the
-     * full New/Status-Changes/Removed set the weekly digest covers.
-     * status_change is included because a terminal status_change
-     * (cancelled/sold/third-party) is how buildChangeGroups() classifies
-     * a removal just as much as a literal 'disappeared' event does --
-     * see DigestService.isRemovalEvent(). first_seen and price_change
-     * are deliberately excluded: a saved property is by definition
-     * already known to the subscriber, so "New" is meaningless here,
-     * and price_change isn't part of what this alert reports. No
-     * property_duplicate_links exclusion here either, matching
+     * date_change/disappeared/status_change/first_seen events -- backs
+     * the daily saved-property alert (new listings, date changes, and
+     * removals), not the full New/Status-Changes/Removed set the weekly
+     * digest covers (price_change still isn't part of what this alert
+     * reports). status_change is included because a terminal
+     * status_change (cancelled/sold/third-party) is how
+     * buildChangeGroups() classifies a removal just as much as a
+     * literal 'disappeared' event does -- see
+     * DigestService.isRemovalEvent().
+     *
+     * first_seen is included (added after an initial "saving a property
+     * IS the 'seen it' signal" assumption turned out not to hold when a
+     * subscriber saves something without having been emailed about it
+     * first -- e.g. saving directly off the map). No property-scoped
+     * "have they been told about this one before" tracking is needed:
+     * first_seen only ever fires once per property, so whether it's
+     * "new to this alert" is fully determined by whether it falls after
+     * `since` -- the same per-subscriber last-alert cutoff every other
+     * event type here already uses (see SavedPropertyAlertService).
+     *
+     * No property_duplicate_links exclusion here either, matching
      * findById()'s reasoning: a saved property should surface its
      * changes regardless of duplicate-link status.
      */
@@ -301,7 +311,7 @@ public class PropertyDigestRepository {
                 JOIN properties p ON p.property_id = a.property_id
                 WHERE e.detected_at >= ?
                   AND p.property_id IN (%s)
-                  AND e.event_type IN ('date_change', 'disappeared', 'status_change')
+                  AND e.event_type IN ('date_change', 'disappeared', 'status_change', 'first_seen')
                 ORDER BY e.detected_at DESC
                 """.formatted(placeholders);
 
