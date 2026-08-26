@@ -62,6 +62,15 @@ public class DigestService {
     private static final int ACTIVE_LISTING_CAP_DAYS = 30;
     private static final int URGENCY_WAIVER_DAYS = 7;
 
+    // "Upcoming Auctions" section on the saved-property
+    // alert email specifically -- narrower than the weekly digest's own
+    // Upcoming Auctions section (ACTIVE_LISTING_CAP_DAYS=30). Distinct
+    // constant from URGENCY_WAIVER_DAYS even though both are 7 days
+    // today -- they mean different things (one's a seasoning waiver,
+    // this one's the actual display window) and shouldn't drift
+    // together just because they happen to match right now.
+    private static final int SAVED_ALERT_UPCOMING_WINDOW_DAYS = 7;
+
     // status_change values meaning the auction won't happen as listed --
     // substring match since the pipeline's status text isn't a
     // controlled vocabulary (e.g. cancelled/canceled both occur).
@@ -329,7 +338,40 @@ public class DigestService {
         String greetingName = escape(subscribers.findUsernameByEmail(email).filter(s -> !s.isBlank()).orElse("there"));
 
         String preferencesLink = buildPreferencesLink(email);
-        String dashboardLink = statusUrl(subscribers.getStates(email), tokenService.issue(email));
+        List<String> states = subscribers.getStates(email);
+        String dashboardLink = statusUrl(states, tokenService.issue(email));
+
+        // Second section: auctions in the subscriber's selected states
+        // happening in the next SAVED_ALERT_UPCOMING_WINDOW_DAYS days --
+        // independent of which properties they've saved. Reuses
+        // filterActiveListings() (terminal-status exclusion, seasoning
+        // rules) so this doesn't duplicate that logic or drift from the
+        // weekly digest's own Upcoming Auctions section; just narrows
+        // the result to the tighter window afterward. savedPropertyIdsFor
+        // lets any of the subscriber's saved properties bypass seasoning
+        // here too, same as everywhere else that set is used.
+        //
+        // Omitted entirely -- not just when there are no states, but
+        // also when there are states with nothing upcoming in them --
+        // matching how New Listings/Date Changes/Removed above are each
+        // silently skipped when empty (see appendChangeSection). An
+        // "empty" section with no listings and no explanatory message
+        // wouldn't tell the subscriber anything a missing section
+        // doesn't already say.
+        String upcomingSectionBlock = "";
+        if (!states.isEmpty()) {
+            LocalDateTime now = LocalDateTime.now();
+            Set<Long> savedPropertyIdsForUpcoming = savedPropertyIdsFor(email);
+            List<UpcomingListing> upcomingInStates = filterActiveListings(repository.findActive(states, now), savedPropertyIdsForUpcoming)
+                    .stream()
+                    .filter(l -> l.auctionDateTime().isBefore(now.plusDays(SAVED_ALERT_UPCOMING_WINDOW_DAYS)))
+                    .toList();
+            if (!upcomingInStates.isEmpty()) {
+                String upcomingSectionHtml = renderUpcoming(upcomingInStates, false, dashboardLink);
+                upcomingSectionBlock = "<div class='section'><h2>Upcoming Auctions (Next 7 Days)</h2>\n"
+                        + upcomingSectionHtml + "\n</div>";
+            }
+        }
 
         // Visible only on the admin test-send path -- explains why a
         // repeated test send always shows the same changes (fixed
@@ -354,6 +396,11 @@ public class DigestService {
                 .test-banner { background:#fff8e1; border-bottom:1px solid #f0d878; color:#7a5c00; font-size:12px; font-weight:600; padding:10px 32px; }
                 .section { padding:24px 32px; }
                 .day-header { font-size:13px; font-weight:600; color:#666; margin:16px 0 8px; text-transform:uppercase; letter-spacing:0.03em; }
+                .listing { padding:10px 0; border-bottom:1px solid #f0f0f0; }
+                .listing:last-child { border-bottom:none; }
+                .listing .addr { font-weight:600; font-size:14px; }
+                .listing .meta { font-size:13px; color:#666; margin-top:2px; }
+                .listing a { color:#1a5c9c; text-decoration:none; font-size:13px; }
                 table.status-table { width:100%%; border-collapse:collapse; font-size:13px; }
                 table.status-table td { padding:8px 4px; border-bottom:1px solid #f0f0f0; }
                 table.status-table a { color:#1a5c9c; text-decoration:none; }
@@ -370,11 +417,12 @@ public class DigestService {
             %s
             <p style='margin-top:16px;'><a href='%s'>View AuctionScout dashboard →</a></p>
             </div>
+            %s
             <div class='footer'>You're receiving this because one or more of your saved properties changed. <a href='%s'>Manage preferences</a>
-            <p style='margin-top:8px;font-size:13px;color:#666;'>Your dashboard link above works without logging in. The preferences link signs you in automatically and works once -- if it's already been used, just log in normally from the <a href='%s'>AuctionScout</a> login page.</p>
+            <p style='margin-top:8px;font-size:13px;color:#666;'>The preferences link above works automatically the first time you click it. If it's already been used, just log in normally from the <a href='%s'>AuctionScout</a> login page.</p>
             </div>
             </div></body></html>
-            """.formatted(testBanner, greetingName, sections.toString(), dashboardLink, preferencesLink, appBaseUrl + "/auction-scout/register.html");
+            """.formatted(testBanner, greetingName, sections.toString(), dashboardLink, upcomingSectionBlock, preferencesLink, appBaseUrl + "/auction-scout/register.html");
     }
 
     /**
