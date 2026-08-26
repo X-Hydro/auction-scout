@@ -165,7 +165,7 @@ public class SavedPropertyAlertService {
             return false;
         }
 
-        mailer.send(email, "Updates on your saved properties", html);
+        mailer.send(email, "AuctionScout - Updates on your saved properties", html);
         Integer subscriberId = subscribers.findIdByEmail(email).orElse(null);
         notifications.recordSent(email, subscriberId, TYPE_SAVED_PROPERTY_ALERT);
         return true;
@@ -188,7 +188,7 @@ public class SavedPropertyAlertService {
         for (SubscriberRepository.ActiveSubscriber s : subscribers.findActiveWithAlertsEnabled()) {
             String html = renderIfChanged(s.email());
             if (html != null) {
-                results.add(new PreviewResult(s.email(), "Updates on your saved properties", html));
+                results.add(new PreviewResult(s.email(), "AuctionScout - Updates on your saved properties", html));
             }
         }
         return results;

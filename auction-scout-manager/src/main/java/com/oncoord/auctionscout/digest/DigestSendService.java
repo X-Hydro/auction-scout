@@ -29,7 +29,7 @@ public class DigestSendService {
     public static final String TYPE_WEEKLY = "weekly";
     public static final String TYPE_TEST = "test";
 
-    private static final String SUBJECT = "AuctionScout Auction Watch";
+    private static final String SUBJECT = "AuctionScout - Auction Watch";
 
     public enum SendResult { SENT, SKIPPED_COOLDOWN, ALREADY_WELCOMED }
 
@@ -72,11 +72,25 @@ public class DigestSendService {
         return sendIfDue(email, TYPE_TEST);
     }
 
-    /** Iterates every active, alerts-enabled subscriber for the weekly scheduled run. */
-    public void sendWeeklyToAllActiveSubscribers() {
+    /**
+     * Iterates every active, alerts-enabled subscriber for the weekly
+     * scheduled run (and, as of the admin "Digest Production Send"
+     * button, for a manually-triggered run too -- same method, same
+     * cooldown rules either way).
+     *
+     * @return how many subscribers actually got sent an email --
+     *         subscribers skipped by the shared cooldown (see
+     *         COOLDOWN) don't count. Callers that only care that the
+     *         run happened can keep ignoring the return value.
+     */
+    public int sendWeeklyToAllActiveSubscribers() {
+        int sentCount = 0;
         for (SubscriberRepository.ActiveSubscriber s : subscribers.findActiveWithAlertsEnabled()) {
-            sendWeekly(s.email());
+            if (sendWeekly(s.email()) == SendResult.SENT) {
+                sentCount++;
+            }
         }
+        return sentCount;
     }
 
     private SendResult sendIfDue(String email, String notificationType) {

@@ -46,6 +46,7 @@ public class AdminEmailController {
 
 
     private final AtomicBoolean savedPropertyAlertRunInProgress = new AtomicBoolean(false);
+    private final AtomicBoolean digestRunInProgress = new AtomicBoolean(false);
 
     public AdminEmailController(DigestSendService digestSendService,
                                 SavedPropertyAlertService savedPropertyAlertService,
@@ -144,6 +145,27 @@ public class AdminEmailController {
             // failed run would permanently wedge every future run behind
             // a flag nothing will ever clear.
             savedPropertyAlertRunInProgress.set(false);
+        }
+    }
+
+
+    @PostMapping("/admin/run-digest")
+    public ResponseEntity<?> runDigest(@RequestHeader(value = "X-Admin-Key", required = false) String providedKey) {
+        if (!keyMatches(providedKey)) {
+            return ResponseEntity.status(401).body(Map.of("error", "Unauthorized"));
+        }
+
+        if (!digestRunInProgress.compareAndSet(false, true)) {
+            return ResponseEntity.status(409).body(Map.of(
+                    "error", "A digest run is already in progress. Wait for it to finish before starting another."
+            ));
+        }
+
+        try {
+            int sentCount = digestSendService.sendWeeklyToAllActiveSubscribers();
+            return ResponseEntity.ok(Map.of("result", "DONE", "sentCount", sentCount));
+        } finally {
+            digestRunInProgress.set(false);
         }
     }
 
