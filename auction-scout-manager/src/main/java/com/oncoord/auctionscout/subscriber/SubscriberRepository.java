@@ -34,14 +34,13 @@ public class SubscriberRepository {
 
     /**
      * Whether a subscriber currently has a live Stripe subscription --
-     * 'active' (billing) or 'trialing' (Stripe's own 30-day trial,
-     * started at Checkout via trial_period_days -- see
-     * SubscriptionController.checkout()). Gates the one thing that's
-     * actually paid: weekly email notifications (see
-     * findActiveWithAlertsEnabled() and hasActiveStripeSubscription()).
-     * Dashboard and preferences access do NOT depend on this -- any
-     * verified subscriber can use those for free; see
-     * findEmailBySessionToken() below.
+     * 'active' (billing) or 'trialing' (Stripe's own trial concept,
+     * currently unused -- see SubscriptionController.checkout()'s
+     * disabled setTrialPeriodDays() call). Reserved for questions
+     * specifically about Stripe account state (does this person have
+     * something to manage/cancel there) -- for "does this subscriber
+     * currently have full-tier access," which also includes the
+     * card-free local trial, use hasActiveAccess() instead.
      */
     private static final String SUBSCRIBED_CLAUSE =
             "stripe_subscription_status IN ('active', 'trialing')";
@@ -187,16 +186,21 @@ public class SubscriberRepository {
      * Who the weekly scheduler should mail. is_active excludes
      * unverified and cancelled subscribers (same flag, see
      * deactivate()'s javadoc); email_alerts_enabled excludes anyone
-     * who's paused emails without cancelling outright; SUBSCRIBED_CLAUSE
-     * excludes anyone who's never subscribed (or whose trial/subscription
-     * has actually ended in Stripe) -- the dashboard is free, but emails
-     * are the paid feature.
+     * who's paused emails without cancelling outright. The access
+     * check is the same as hasActiveAccess() -- either a real Stripe
+     * subscription, or still within the card-free TRIAL_WINDOW_MILLIS
+     * -- expressed directly in SQL here rather than calling
+     * hasActiveAccess() per-row, so this stays one query instead of
+     * N+1. If these two definitions of "has access" ever drift apart,
+     * this is the one to check first.
      */
     public List<ActiveSubscriber> findActiveWithAlertsEnabled() {
+        long trialCutoff = System.currentTimeMillis() - TRIAL_WINDOW_MILLIS;
         return jdbc.query(
                 "SELECT id, email FROM subscribers WHERE is_active = 1 AND email_alerts_enabled = 1 " +
-                        "AND " + SUBSCRIBED_CLAUSE,
-                (rs, rowNum) -> new ActiveSubscriber(rs.getInt("id"), rs.getString("email"))
+                        "AND (" + SUBSCRIBED_CLAUSE + " OR subscription_start_date >= ?)",
+                (rs, rowNum) -> new ActiveSubscriber(rs.getInt("id"), rs.getString("email")),
+                trialCutoff
         );
     }
 
@@ -274,6 +278,47 @@ public class SubscriberRepository {
                 email
         );
         return "active".equals(status) || "trialing".equals(status);
+    }
+
+    // How long the card-free local trial lasts, counted from
+    // subscription_start_date (set once, at first verification or
+    // first states save -- see markVerifiedAndIssueSessionToken() and
+    // setStates()). Distinct from Stripe's own trial_period_days
+    // concept (see SubscriptionController.checkout()) -- that one is
+    // currently disabled in favor of this, since it requires a card
+    // up front and this doesn't. If Stripe's card-required trial is
+    // ever re-enabled instead of this one, this constant becomes
+    // unused rather than needing to be removed.
+    private static final long TRIAL_WINDOW_MILLIS = 30L * 24 * 60 * 60 * 1000;
+
+    /**
+     * True if this subscriber currently has full-tier access (up to
+     * MAX_STATES_PER_SUBSCRIBER states, saved properties, alerts)
+     * either because they have a real Stripe subscription, or because
+     * they're still within their first TRIAL_WINDOW_MILLIS since
+     * subscription_start_date -- the card-free free trial.
+     *
+     * Deliberately separate from hasActiveStripeSubscription(), not a
+     * replacement for it: that method stays reserved for "does this
+     * subscriber have something to actually manage/cancel in Stripe"
+     * (see PreferencesController's Subscribe-vs-Cancel UI decision,
+     * SubscriptionController.cancel()/resume()/billingPortal()).
+     * Conflating the two would show a "Cancel" button to someone who's
+     * never touched Stripe and has nothing there to cancel. Use this
+     * method for entitlement checks (states cap, alert eligibility);
+     * use hasActiveStripeSubscription() for anything about Stripe
+     * account state specifically.
+     */
+    public boolean hasActiveAccess(String email) {
+        if (hasActiveStripeSubscription(email)) {
+            return true;
+        }
+        Optional<Long> startDate = findSubscriptionStartDateByEmail(email);
+        if (startDate.isEmpty()) {
+            return false;
+        }
+        long age = System.currentTimeMillis() - startDate.get();
+        return age >= 0 && age <= TRIAL_WINDOW_MILLIS;
     }
 
     /**
@@ -387,15 +432,15 @@ public class SubscriberRepository {
      * less error-prone for a UI that submits "here's my complete
      * selection" than diffing adds/removes client-side.
      *
-     * @throws IllegalArgumentException if more than 4 states are given,
+     * @throws IllegalArgumentException if more than MAX_STATES_PER_SUBSCRIBER states are given,
      *         or if the subscriber doesn't exist / isn't verified
      */
     public void setStates(String email, List<String> states) {
-        boolean subscribed = hasActiveStripeSubscription(email);
-        int maxAllowed = subscribed ? MAX_STATES_PER_SUBSCRIBER : MAX_STATES_FREE;
+        boolean hasAccess = hasActiveAccess(email);
+        int maxAllowed = hasAccess ? MAX_STATES_PER_SUBSCRIBER : MAX_STATES_FREE;
 
         if (states.size() > maxAllowed) {
-            throw new IllegalArgumentException(subscribed
+            throw new IllegalArgumentException(hasAccess
                     ? "A subscriber may select at most " + MAX_STATES_PER_SUBSCRIBER + " states"
                     : "Free accounts are limited to 1 state — subscribe to select up to "
                     + MAX_STATES_PER_SUBSCRIBER + ".");

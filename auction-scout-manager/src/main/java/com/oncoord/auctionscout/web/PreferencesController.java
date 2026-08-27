@@ -32,7 +32,7 @@ public class PreferencesController {
 
     // New England states only — matches AuctionScout's actual coverage
     // area. Rejecting anything else here is a light validation layer,
-    // not a security boundary (SubscriberRepository already caps at MAX_STATES_PER_SUBSCRIBER
+    // not a security boundary (SubscriberRepository already caps at 3
     // states regardless of content).
     private static final Set<String> VALID_STATES = Set.of("ME", "NH", "VT", "MA", "RI", "CT");
 
@@ -71,7 +71,16 @@ public class PreferencesController {
         response.put("email", email.get());
         response.put("states", subscribers.getStates(email.get()));
         response.put("emailAlertsEnabled", subscribers.getEmailAlertsEnabled(email.get()));
+        // hasActiveSubscription: Stripe-only -- drives the Subscribe vs.
+        // Cancel button/billing UI specifically. hasActiveAccess: Stripe
+        // OR the card-free local trial -- drives what this subscriber is
+        // actually entitled to right now (states cap, alerts). These are
+        // deliberately different questions; a trialing-with-no-card
+        // subscriber should see "up to 3 states" (hasActiveAccess=true)
+        // without seeing a "Cancel" button for a subscription that
+        // doesn't exist (hasActiveSubscription=false).
         response.put("hasActiveSubscription", subscribers.hasActiveStripeSubscription(email.get()));
+        response.put("hasActiveAccess", subscribers.hasActiveAccess(email.get()));
 
         String status = subscribers.findSubscriptionStatusByEmail(email.get()).orElse(null);
         response.put("subscriptionStatus", status);

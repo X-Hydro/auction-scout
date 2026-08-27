@@ -70,9 +70,10 @@ public class StatusController {
      * are still public (an empty/missing states param returns an empty
      * result rather than erroring), but a subscriber's *entitlement* to
      * view more than 1 state at once is checked here, the same
-     * hasActiveStripeSubscription() gate used by
-     * SubscriberRepository.setStates(). No token, or a token that
-     * doesn't resolve to a subscribed subscriber, is treated as free.
+     * hasActiveAccess() gate used by SubscriberRepository.setStates() --
+     * either a real Stripe subscription or the card-free trial window.
+     * No token, or a token that doesn't resolve to a subscriber with
+     * active access, is treated as free.
      *
      * Resolved gap (previously noted here): weekly digest/saved-alert
      * emails used to link here with a bare, tokenless ?states=, so a
@@ -130,15 +131,15 @@ public class StatusController {
                     .toList();
         }
 
-        boolean subscribed = subscriberEmail
-                .map(subscribers::hasActiveStripeSubscription)
+        boolean hasAccess = subscriberEmail
+                .map(subscribers::hasActiveAccess)
                 .orElse(false);
 
-        int maxStates = subscribed ? SubscriberRepository.MAX_STATES_PER_SUBSCRIBER : 1;
+        int maxStates = hasAccess ? SubscriberRepository.MAX_STATES_PER_SUBSCRIBER : 1;
 
         if (stateList.size() > maxStates) {
             return ResponseEntity.status(403).body(java.util.Map.of(
-                    "error", subscribed
+                    "error", hasAccess
                             ? "Your plan allows up to " + maxStates + " states at a time."
                             : "Free accounts can view 1 state at a time. " +
                             "Log in with an active subscription to view more.",

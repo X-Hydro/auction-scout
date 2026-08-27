@@ -66,13 +66,19 @@ public class SubscriptionController {
 
     /**
      * Creates a Stripe Checkout Session for the caller and returns its
-     * hosted URL for the frontend to redirect to. trial_period_days=30
-     * gives Stripe its own 30-day trial: a card is collected now, but
-     * nothing is charged until the trial ends, and the subscriber can
-     * cancel any time before then with nothing paid. This is the one
-     * thing access is actually gated on -- the dashboard itself is free
-     * for any verified subscriber (see SubscriberRepository
-     * .findEmailBySessionToken()); only weekly emails require this.
+     * hosted URL for the frontend to redirect to.
+     *
+     * DISABLED: this used to set trial_period_days=30 (Stripe's own
+     * trial -- collects a card immediately, doesn't charge for 30
+     * days). Replaced by a card-free local trial instead (see
+     * SubscriberRepository.hasActiveAccess()/TRIAL_WINDOW_MILLIS),
+     * which doesn't require a card to get full access, unlike Stripe's
+     * version. Checkout now charges immediately on completion since
+     * the free period already happened before the subscriber ever gets
+     * here. The Stripe trial code below is commented out, not removed
+     * -- if the card-free trial is ever dropped in favor of Stripe's
+     * own trial instead, uncomment setSubscriptionData(...) and this
+     * goes back to exactly how it worked before.
      *
      * client_reference_id carries the subscriber's email so
      * StripeWebhookController can attribute the resulting
@@ -98,9 +104,12 @@ public class SubscriptionController {
                         .setPrice(stripePriceId)
                         .setQuantity(1L)
                         .build())
-                .setSubscriptionData(SessionCreateParams.SubscriptionData.builder()
-                        .setTrialPeriodDays(30L)
-                        .build())
+                // DISABLED -- see javadoc above. Uncomment to restore
+                // Stripe's own card-required trial instead of the local
+                // card-free one.
+                // .setSubscriptionData(SessionCreateParams.SubscriptionData.builder()
+                //         .setTrialPeriodDays(30L)
+                //         .build())
                 .setSuccessUrl(appBaseUrl + "/auction-scout/preferences.html?checkout=success")
                 .setCancelUrl(appBaseUrl + "/auction-scout/preferences.html?checkout=cancelled")
                 .build();

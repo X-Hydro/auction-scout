@@ -29,17 +29,29 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>Access model as of this test file: the dashboard and preferences
  * page are free for any verified (is_active=1) subscriber, regardless
  * of subscription_start_date or Stripe status -- see
- * findEmailBySessionToken(). Only weekly emails are gated on actually
- * having a Stripe subscription, active or still in Stripe's own trial
- * -- see hasActiveStripeSubscription() and findActiveWithAlertsEnabled().
- * subscription_start_date is still recorded (see the setStates() tests
- * below) but no longer drives any access decision.
+ * findEmailBySessionToken(). States-cap and weekly-email eligibility
+ * are gated on hasActiveAccess(): either a real Stripe subscription
+ * (active or trialing -- see hasActiveStripeSubscription()), OR still
+ * within TRIAL_WINDOW_MILLIS (30 days) of subscription_start_date --
+ * the card-free local trial. Past that window with no Stripe
+ * subscription, access drops to the free tier (1 state, no weekly
+ * emails). Tests that specifically isolate "no Stripe subscription"
+ * behavior use a subscription_start_date well outside the trial
+ * window (see TRIAL_EXPIRED_START below) so the trial doesn't mask
+ * what they're actually testing.
  */
 class SubscriberRepositoryTest {
 
     private static final Path TEST_DB_DIR = Path.of("src/test/db");
     private static final Path DB_PATH = TEST_DB_DIR.resolve("subscriber-repository-test.db");
     private static final String USER_NAME = "AuctionScout User";
+
+    // Registered well outside the 30-day trial window (see
+    // SubscriberRepository.TRIAL_WINDOW_MILLIS), so tests using this
+    // are isolating Stripe-only behavior -- the trial can't be masking
+    // what they're actually testing.
+    private static final long TRIAL_EXPIRED_START =
+            System.currentTimeMillis() - (45L * 24 * 60 * 60 * 1000);
 
     private SingleConnectionDataSource dataSource;
     private JdbcTemplate jdbc;
@@ -67,11 +79,13 @@ class SubscriberRepositoryTest {
 
     /**
      * Builds a verified, is_active=1 subscriber with a session token and
-     * a given subscription_start_date. subscription_start_date no longer
-     * drives any access decision -- it's kept here only because the
-     * setStates() tests below still exercise it, and because a real
-     * verified row always has one set. Most tests just pass
-     * System.currentTimeMillis().
+     * a given subscription_start_date. subscription_start_date drives
+     * the card-free trial window (see hasActiveAccess()) but never
+     * affects dashboard/preferences access itself (see
+     * findEmailBySessionToken()). Most tests pass
+     * System.currentTimeMillis() (fresh registration, within the trial);
+     * tests isolating Stripe-only behavior use TRIAL_EXPIRED_START
+     * instead.
      */
     private String createActiveSubscriber(String email, Long subscriptionStartDate) {
         String token = "tok-" + email;
@@ -167,13 +181,73 @@ class SubscriberRepositoryTest {
         assertFalse(repo.hasActiveStripeSubscription("lapsed@example.com"));
     }
 
+    // ---- hasActiveAccess: entitlement for the states cap and weekly emails -- Stripe OR the card-free trial ----
+
+    @Test
+    void hasActiveAccess_true_duringTrialWindow_withNoStripeSubscription() {
+        createActiveSubscriber("trial@example.com", System.currentTimeMillis());
+
+        assertTrue(repo.hasActiveAccess("trial@example.com"));
+    }
+
+    @Test
+    void hasActiveAccess_false_pastTrialWindow_withNoStripeSubscription() {
+        createActiveSubscriber("expired@example.com", TRIAL_EXPIRED_START);
+
+        assertFalse(repo.hasActiveAccess("expired@example.com"));
+    }
+
+    @Test
+    void hasActiveAccess_false_whenSubscriptionStartDateIsNull() {
+        // Shouldn't normally happen for a verified row (see
+        // markVerifiedAndIssueSessionToken()), but hasActiveAccess()
+        // should fail safe -- no start date to measure a trial from,
+        // and no Stripe subscription either.
+        createActiveSubscriber("nostart@example.com", null);
+
+        assertFalse(repo.hasActiveAccess("nostart@example.com"));
+    }
+
+    @Test
+    void hasActiveAccess_true_viaStripeSubscription_evenPastTrialWindow() {
+        // A real subscription doesn't expire just because the local
+        // trial window would have -- the two checks are independent,
+        // combined with OR.
+        createActiveSubscriber("longtimepaid@example.com", TRIAL_EXPIRED_START);
+        repo.recordStripeSubscription("longtimepaid@example.com", "cus_lt", "sub_lt", "active");
+
+        assertTrue(repo.hasActiveAccess("longtimepaid@example.com"));
+    }
+
+    @Test
+    void hasActiveAccess_false_pastTrialWindow_andStripeSubscriptionCanceled() {
+        createActiveSubscriber("bothexpired@example.com", TRIAL_EXPIRED_START);
+        repo.recordStripeSubscription("bothexpired@example.com", "cus_be", "sub_be", "active");
+        repo.updateStripeSubscriptionStatus("sub_be", "canceled");
+
+        assertFalse(repo.hasActiveAccess("bothexpired@example.com"));
+    }
+
     // ---- findActiveWithAlertsEnabled: the weekly send list -- the one thing actually gated ----
 
     @Test
-    void findActiveWithAlertsEnabled_excludesSubscribersWhoNeverSubscribed() {
-        createActiveSubscriber("neversubscribed@example.com", System.currentTimeMillis());
+    void findActiveWithAlertsEnabled_excludesSubscribersWhoNeverSubscribed_andAreOutsideTrialWindow() {
+        createActiveSubscriber("neversubscribed@example.com", TRIAL_EXPIRED_START);
 
         assertTrue(repo.findActiveWithAlertsEnabled().isEmpty());
+    }
+
+    @Test
+    void findActiveWithAlertsEnabled_includesSubscribersWithinTrialWindow_evenWithNoStripeSubscription() {
+        // The card-free local trial -- see SubscriberRepository
+        // .hasActiveAccess()/TRIAL_WINDOW_MILLIS. Never touched Stripe
+        // at all, but registered recently enough to still be eligible.
+        createActiveSubscriber("trialonly@example.com", System.currentTimeMillis());
+
+        List<SubscriberRepository.ActiveSubscriber> result = repo.findActiveWithAlertsEnabled();
+
+        assertEquals(1, result.size());
+        assertEquals("trialonly@example.com", result.get(0).email());
     }
 
     @Test
@@ -200,7 +274,10 @@ class SubscriberRepositoryTest {
 
     @Test
     void findActiveWithAlertsEnabled_excludesPastDueOrCanceledSubscribers() {
-        createActiveSubscriber("lapsed@example.com", System.currentTimeMillis());
+        // Registered outside the trial window -- otherwise a canceled
+        // Stripe status wouldn't matter, since the trial alone would
+        // still grant eligibility (see the trial-window tests above).
+        createActiveSubscriber("lapsed@example.com", TRIAL_EXPIRED_START);
         repo.recordStripeSubscription("lapsed@example.com", "cus_6", "sub_6", "active");
         repo.updateStripeSubscriptionStatus("sub_6", "canceled");
 
@@ -246,7 +323,9 @@ class SubscriberRepositoryTest {
 
     @Test
     void updateStripeSubscriptionStatus_affectsEmailEligibility_butNotDashboardAccess() {
-        String token = createActiveSubscriber("cancelme@example.com", System.currentTimeMillis());
+        // Outside the trial window -- see comment on
+        // findActiveWithAlertsEnabled_excludesPastDueOrCanceledSubscribers.
+        String token = createActiveSubscriber("cancelme@example.com", TRIAL_EXPIRED_START);
         repo.recordStripeSubscription("cancelme@example.com", "cus_x", "sub_x", "active");
 
         assertTrue(repo.hasActiveStripeSubscription("cancelme@example.com"), "sanity check: active status counts");
@@ -303,7 +382,7 @@ class SubscriberRepositoryTest {
         // is_active = 0 row, e.g. registered but never clicked the magic link.
         jdbc.update("INSERT INTO subscribers (email, username, created_at, verified_at, is_active) " +
                         "VALUES (?, ?, ?, NULL, 0)",
-                  "unverified@example.com", USER_NAME, System.currentTimeMillis());
+                "unverified@example.com", USER_NAME, System.currentTimeMillis());
 
         assertFalse(repo.findEmailBySessionToken("irrelevant").isPresent());
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
@@ -323,10 +402,26 @@ class SubscriberRepositoryTest {
 
     @Test
     void setStates_throws_whenFreeSubscriberRequestsMoreThanOneState() {
-        createActiveSubscriber("free@example.com", System.currentTimeMillis());
+        // Outside the trial window -- otherwise this is no longer a
+        // "free" subscriber for setStates()'s purposes, see
+        // setStates_allowsMultipleStates_duringTrialWindow below.
+        createActiveSubscriber("free@example.com", TRIAL_EXPIRED_START);
 
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
                 () -> repo.setStates("free@example.com", List.of("VT", "NH")));
+    }
+
+    @Test
+    void setStates_allowsMultipleStates_duringTrialWindow_withNoStripeSubscription() {
+        // The card-free local trial applies here too -- setStates()
+        // uses hasActiveAccess(), not hasActiveStripeSubscription()
+        // directly, so a recent registrant gets the full state cap
+        // without ever touching Stripe.
+        createActiveSubscriber("trialstates@example.com", System.currentTimeMillis());
+
+        repo.setStates("trialstates@example.com", List.of("MA", "NH", "RI"));
+
+        assertEquals(List.of("MA", "NH", "RI"), repo.getStates("trialstates@example.com"));
     }
 
     @Test
@@ -334,7 +429,9 @@ class SubscriberRepositoryTest {
         // Someone whose Stripe subscription lapsed should be treated the
         // same as never having subscribed -- see
         // hasActiveStripeSubscription_false_whenPastDueOrCanceled above.
-        createActiveSubscriber("lapsed@example.com", System.currentTimeMillis());
+        // Outside the trial window too, same reasoning as the other
+        // Stripe-only tests in this file.
+        createActiveSubscriber("lapsed@example.com", TRIAL_EXPIRED_START);
         repo.recordStripeSubscription("lapsed@example.com", "cus_lapsed", "sub_lapsed", "active");
         repo.updateStripeSubscriptionStatus("sub_lapsed", "canceled");
 
@@ -343,29 +440,29 @@ class SubscriberRepositoryTest {
     }
 
     @Test
-    void setStates_allowsUpToFourStates_forActiveSubscriber() {
+    void setStates_allowsUpToMaxStates_forActiveSubscriber() {
         createActiveSubscriber("paid@example.com", System.currentTimeMillis());
         repo.recordStripeSubscription("paid@example.com", "cus_paid", "sub_paid", "active");
 
-        repo.setStates("paid@example.com", List.of("VT", "NH", "ME", "MA"));
+        repo.setStates("paid@example.com", List.of("MA", "NH", "RI"));
 
-        assertEquals(List.of("MA", "ME", "NH", "VT"), repo.getStates("paid@example.com"));
+        assertEquals(List.of("MA", "NH", "RI"), repo.getStates("paid@example.com"));
     }
 
     @Test
-    void setStates_allowsUpToFourStates_forTrialingSubscriber() {
+    void setStates_allowsUpToMaxStates_forTrialingSubscriber() {
         // Trialing gets identical access to active -- see
         // hasActiveStripeSubscription_true_whenTrialing above.
         createActiveSubscriber("trialing@example.com", System.currentTimeMillis());
         repo.recordStripeSubscription("trialing@example.com", "cus_trial", "sub_trial", "trialing");
 
-        repo.setStates("trialing@example.com", List.of("VT", "NH", "ME", "MA"));
+        repo.setStates("trialing@example.com", List.of("MA", "NH", "RI"));
 
-        assertEquals(List.of("MA", "ME", "NH", "VT"), repo.getStates("trialing@example.com"));
+        assertEquals(List.of("MA", "NH", "RI"), repo.getStates("trialing@example.com"));
     }
 
     @Test
-    void setStates_throws_whenSubscribedSubscriberExceedsFourStates() {
+    void setStates_throws_whenSubscribedSubscriberExceedsMaxStates() {
         createActiveSubscriber("paid@example.com", System.currentTimeMillis());
         repo.recordStripeSubscription("paid@example.com", "cus_paid2", "sub_paid2", "active");
 
