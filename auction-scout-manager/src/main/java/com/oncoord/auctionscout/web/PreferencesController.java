@@ -32,7 +32,7 @@ public class PreferencesController {
 
     // New England states only — matches AuctionScout's actual coverage
     // area. Rejecting anything else here is a light validation layer,
-    // not a security boundary (SubscriberRepository already caps at 4
+    // not a security boundary (SubscriberRepository already caps at MAX_STATES_PER_SUBSCRIBER
     // states regardless of content).
     private static final Set<String> VALID_STATES = Set.of("ME", "NH", "VT", "MA", "RI", "CT");
 
