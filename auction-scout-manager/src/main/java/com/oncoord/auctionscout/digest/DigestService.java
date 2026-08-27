@@ -53,10 +53,9 @@ public class DigestService {
     private static final int NEW_LISTING_LINK_WINDOW_DAYS = 21;
 
     // How long a digest's "view all" links stay live without a login
-    // step. Matches the weekly send cadence -- a link should still work
-    // if someone opens last week's email a few days late. Must match
-    // the TTL StatusController checks this same token against.
-    private static final long VIEW_TOKEN_TTL_MILLIS = 7L * 24 * 60 * 60 * 1000;
+    // step -- see com.oncoord.auth.common.TokenTtl.VIEW_TOKEN_TTL_MILLIS,
+    // the single shared source of truth StatusController and
+    // PreferencesController both check this token against.
 
     // See filterActiveListings() for how these two combine.
     private static final int ACTIVE_LISTING_CAP_DAYS = 30;

@@ -2,6 +2,7 @@ package com.oncoord.auctionscout.web;
 
 import com.oncoord.auth.common.TokenRecord;
 import com.oncoord.auth.common.TokenService;
+import com.oncoord.auth.common.TokenTtl;
 import com.oncoord.auctionscout.subscriber.SubscriberRepository;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -13,8 +14,6 @@ import java.util.Optional;
 
 @RestController
 public class VerifyController {
-
-    private static final long TOKEN_TTL_MILLIS = 30L * 60 * 1000; // 30 minutes
 
     private final TokenService tokenService;
     private final SubscriberRepository subscribers;
@@ -34,7 +33,7 @@ public class VerifyController {
         String normalizedEmail = email.trim().toLowerCase();
 
         Optional<TokenRecord> record = tokenService.verifyAndConsume(
-                normalizedEmail, token, TOKEN_TTL_MILLIS
+                normalizedEmail, token, TokenTtl.LOGIN_TOKEN_TTL_MILLIS
         );
 
         if (record.isEmpty()) {

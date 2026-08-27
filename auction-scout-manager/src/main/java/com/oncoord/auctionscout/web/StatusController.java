@@ -4,6 +4,7 @@ import com.oncoord.auctionscout.digest.DigestService;
 import com.oncoord.auctionscout.subscriber.SubscriberRepository;
 import com.oncoord.auth.common.TokenRecord;
 import com.oncoord.auth.common.TokenService;
+import com.oncoord.auth.common.TokenTtl;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -33,12 +34,6 @@ import java.util.Optional;
  */
 @RestController
 public class StatusController {
-
-    // Must match DigestService.VIEW_TOKEN_TTL_MILLIS -- the token is
-    // minted there and checked here; a mismatch would either reject a
-    // link the sender intended to still be valid, or accept one the
-    // sender intended to have already expired.
-    private static final long VIEW_TOKEN_TTL_MILLIS = 7L * 24 * 60 * 60 * 1000;
 
     private final SubscriberRepository subscribers;
     private final DigestService digestService;
@@ -121,7 +116,7 @@ public class StatusController {
                 : Optional.empty();
 
         if (subscriberEmail.isEmpty() && vt != null && !vt.isBlank()) {
-            subscriberEmail = tokenService.peek(vt, VIEW_TOKEN_TTL_MILLIS)
+            subscriberEmail = tokenService.peek(vt, TokenTtl.VIEW_TOKEN_TTL_MILLIS)
                     .map(TokenRecord::subject);
         }
 
