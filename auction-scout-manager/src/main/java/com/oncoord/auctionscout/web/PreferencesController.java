@@ -1,6 +1,7 @@
 package com.oncoord.auctionscout.web;
 
 import com.oncoord.auctionscout.digest.DigestSendService;
+import com.oncoord.auctionscout.invoice.InvoiceRepository;
 import com.oncoord.auctionscout.subscriber.SubscriberRepository;
 import com.oncoord.auth.common.TokenRecord;
 import com.oncoord.auth.common.TokenService;
@@ -39,12 +40,14 @@ public class PreferencesController {
     private final SubscriberRepository subscribers;
     private final DigestSendService digestSendService;
     private final TokenService tokenService;
+    private final InvoiceRepository invoices;
 
     public PreferencesController(SubscriberRepository subscribers, DigestSendService digestSendService,
-                                 TokenService tokenService) {
+                                 TokenService tokenService, InvoiceRepository invoices) {
         this.subscribers = subscribers;
         this.digestSendService = digestSendService;
         this.tokenService = tokenService;
+        this.invoices = invoices;
     }
 
     // emailAlertsEnabled defaults to true when omitted, so existing
@@ -90,6 +93,7 @@ public class PreferencesController {
         response.put("localTrialEndDate", subscribers.findLocalTrialEndDateByEmail(email.get())
                 .map(PreferencesController::epochMillisToIsoDate)
                 .orElse(null));
+        response.put("hasBillingHistory", invoices.hasBillingHistory(email.get()));
 
         String status = subscribers.findSubscriptionStatusByEmail(email.get()).orElse(null);
         response.put("subscriptionStatus", status);

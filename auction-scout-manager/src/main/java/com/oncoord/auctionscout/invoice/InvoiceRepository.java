@@ -41,6 +41,14 @@ public class InvoiceRepository {
         );
     }
 
+    public boolean hasBillingHistory(String email) {
+        Integer count = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM invoices WHERE email = ? AND amount_cents > 0",
+                Integer.class, email
+        );
+        return count != null && count > 0;
+    }
+
     public record InvoiceRecord(
             long id, String email, long invoiceDate, long amountCents, String status,
             String description, String paymentReference, String paymentLast4, String stripeInvoiceId
