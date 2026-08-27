@@ -81,6 +81,15 @@ public class PreferencesController {
         // doesn't exist (hasActiveSubscription=false).
         response.put("hasActiveSubscription", subscribers.hasActiveStripeSubscription(email.get()));
         response.put("hasActiveAccess", subscribers.hasActiveAccess(email.get()));
+        // Card-free local trial end date -- populated regardless of
+        // Stripe status, since it applies before anyone has ever
+        // checked out. The frontend only uses this when
+        // subscriptionStatus is null (no Stripe subscription exists
+        // yet); once a real Stripe subscription exists, subscriptionDate
+        // below takes over as the authoritative date.
+        response.put("localTrialEndDate", subscribers.findLocalTrialEndDateByEmail(email.get())
+                .map(PreferencesController::epochMillisToIsoDate)
+                .orElse(null));
 
         String status = subscribers.findSubscriptionStatusByEmail(email.get()).orElse(null);
         response.put("subscriptionStatus", status);

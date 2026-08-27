@@ -386,6 +386,22 @@ public class SubscriberRepository {
         );
     }
 
+    /**
+     * The card-free local trial's end date/time for this subscriber --
+     * subscription_start_date + TRIAL_WINDOW_MILLIS. Used by
+     * PreferencesController to show a trial countdown even before any
+     * real Stripe subscription exists (subscriptionStatus/
+     * subscriptionDate are both null until checkout -- see
+     * resolveSubscriptionDate()). Empty only if subscription_start_date
+     * itself isn't set, which shouldn't normally happen for a verified
+     * subscriber (see markVerifiedAndIssueSessionToken()'s COALESCE)
+     * but is defensive against a row reached some other way (tests,
+     * direct DB edits).
+     */
+    public Optional<Long> findLocalTrialEndDateByEmail(String email) {
+        return findSubscriptionStartDateByEmail(email).map(start -> start + TRIAL_WINDOW_MILLIS);
+    }
+
     public Optional<String> findStripeSubscriptionIdByEmail(String email) {
         return jdbc.query(
                 "SELECT stripe_subscription_id FROM subscribers WHERE email = ?",
