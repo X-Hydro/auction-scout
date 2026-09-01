@@ -27,6 +27,7 @@ from urllib.parse import urlparse, parse_qs
 from dateutil import parser as dateparser
 
 from dedup import coord_key, winning_source
+from statuses import EXCLUDED_STATUSES, PAST_DUE_STATUS
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -666,6 +667,42 @@ def load(csv_path: str, db_path: str):
                 (auction_id, status, ts, run_id),
             )
             disappeared_count += 1
+
+    # --- Detect past-due listings: the auction's date has already passed,
+    # but its status is neither an explicit terminal status a source
+    # reported (EXCLUDED_STATUSES) nor already marked past-due from a
+    # prior run. A source can simply leave a listing page up after the
+    # date passes without ever updating its own status text -- e.g.
+    # property_id 33's Sullivan listing stayed "active" for a Aug 18
+    # auction well after that date came and went. This can't rely on
+    # matching a specific "still scheduled" string (that wording varies
+    # by source -- "active", "on_time", etc.); it only needs to know
+    # which statuses are DEFINITELY terminal already, and treat anything
+    # else, once past its date, as done. Scoped to the whole table, not
+    # just sources_in_this_run, since this is purely a function of the
+    # clock vs. a stored date -- it doesn't depend on what this run's CSV
+    # contained.
+    past_due_count = 0
+    excluded_placeholders = ",".join("?" for _ in EXCLUDED_STATUSES)
+    past_due_candidates = cur.execute(
+        f"""SELECT auction_id, status FROM auctions
+            WHERE status NOT IN ({excluded_placeholders})
+              AND auction_datetime IS NOT NULL
+              AND auction_datetime < ?""",
+        (*EXCLUDED_STATUSES, ts),
+    ).fetchall()
+    for auction_id, prior_status in past_due_candidates:
+        cur.execute(
+            """INSERT INTO auction_events
+               (auction_id, event_type, old_value, new_value, detected_at, spider_run_id)
+               VALUES (?, 'status_change', ?, ?, ?, ?)""",
+            (auction_id, prior_status, PAST_DUE_STATUS, ts, run_id),
+        )
+        cur.execute(
+            "UPDATE auctions SET status=?, last_updated_at=? WHERE auction_id=?",
+            (PAST_DUE_STATUS, ts, auction_id),
+        )
+        past_due_count += 1
 
     cur.execute(
         """UPDATE spider_runs SET source=?, finished_at=?, records_found=?,

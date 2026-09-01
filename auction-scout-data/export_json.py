@@ -37,6 +37,8 @@ from pathlib import Path
 from datetime import date
 import shutil
 
+from statuses import EXCLUDED_STATUSES
+
 
 def _normalize_path(path: str) -> str:
     """Accepts Windows paths ("C:/..." or "C:\\...") as-is, and converts
@@ -52,18 +54,9 @@ def _normalize_path(path: str) -> str:
 
 
 
-# Statuses that mean the auction is over and should NOT appear on the live map.
-# Add to this list as new terminal-status wording turns up across sources.
-# Everything NOT in this list is treated as still-live and gets exported.
-EXCLUDED_STATUSES = (
-    "sold back to mortgagee",
-    "3rd party purchase",
-    "sold",
-    "canceled",
-    "cancelled",
-    "withdrawn",
-    'bank buy back'
-)
+# EXCLUDED_STATUSES now lives in statuses.py (shared with load_csv.py) --
+# see that module's docstring. Everything NOT in that list is treated as
+# still-live and gets exported.
 
 # If a property hasn't been re-confirmed by a scrape within this many days,
 # treat it as no longer live regardless of its last recorded status -- a
