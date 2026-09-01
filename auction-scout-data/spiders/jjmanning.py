@@ -5,15 +5,20 @@ APPROACH: single static calendar page for discovery + link filtering,
 detail page hop for full data (address, terms, PDF links).
 
 UPCOMING vs. DECIDED (Under Agreement / SOLD / SOLD FOR $X) filtering:
-The calendar page renders each listing as an <article class="... type-auction
-...">. Decided listings (Under Agreement/SOLD/etc.) structurally LACK the
-date icon-box widget entirely (Elementor conditional visibility hides it --
-verified in raw HTML via an "<!-- dce invisible element ... -->" comment
-where it would be). Still-upcoming listings (including "Selling Absolute
-Above $100K" labeled ones -- that's a sale-TYPE note, not a completion
-status) always have it. So: presence of the date icon-box link is used as
-the upcoming/decided signal, NOT text-matching against status strings --
-more robust against wording changes ("SOLD FOR 75MM" etc.).
+The calendar page renders each listing as a <div data-elementor-type="loop-item"
+class="... auction type-auction status-publish ...">. (Confirmed 2026-09-01
+against real live HTML -- NOT an <article> tag as originally assumed; that
+wrong assumption in parse_listing()'s top-level selector was the actual
+cause of a 0-rows-every-run outage, since soup.select('article[class*=
+"type-auction"]') matched nothing at all on the real page.) Decided listings
+(Under Agreement/SOLD/etc.) structurally LACK the date icon-box widget
+entirely (Elementor conditional visibility hides it -- verified in raw HTML
+via an "<!-- dce invisible element ... -->" comment where it would be).
+Still-upcoming listings (including "Selling Absolute Above $100K" labeled
+ones -- that's a sale-TYPE note, not a completion status) always have it.
+So: presence of the date icon-box link is used as the upcoming/decided
+signal, NOT text-matching against status strings -- more robust against
+wording changes ("SOLD FOR 75MM" etc.).
 
 No pagination -- confirmed the calendar page renders everything (upcoming
 AND historical back to ~2021) in one static page, all in the initial HTML
@@ -94,7 +99,14 @@ class JJManningSpider(AuctionSpider):
 
     def parse_listing(self, soup, listing_url):
         rows = []
-        for article in soup.select('article[class*="type-auction"]'):
+        # Real live markup confirmed 2026-09-01: each listing is a
+        # <div data-elementor-type="loop-item" class="... type-auction ...">,
+        # NOT an <article> tag -- see module docstring. The old
+        # 'article[class*="type-auction"]' selector matched zero elements
+        # on the real page, which was the actual cause of this spider
+        # returning 0 rows every run despite real upcoming auctions being
+        # on the page.
+        for article in soup.select('div[data-elementor-type="loop-item"][class*="type-auction"]'):
             title_a = article.select_one("h3.elementor-heading-title a")
             if not title_a or not title_a.get("href"):
                 continue
