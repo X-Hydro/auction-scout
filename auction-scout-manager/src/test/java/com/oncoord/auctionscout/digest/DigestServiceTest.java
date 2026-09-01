@@ -670,6 +670,103 @@ class DigestServiceTest {
                 "nothing is \"coming\" for a listing that's already gone -- the cell should be empty, not this label");
     }
 
+  
+    @Test
+    void render_suppressesRemoved_whenAuctionMuchOlderThanDetection() {
+        // Auction happened back in May; the removal wasn't detected
+        // until mid-July -- a ~2.5 month gap, well past
+        // REMOVED_MAX_AGE_DAYS. This is exactly the "one-time
+        // reconciliation surfaces months-old history as if it were
+        // fresh news" case the check exists to prevent (see
+        // 57 Scamman Street in the real data that motivated this).
+        long propertyId = testData.property()
+                .address("18 Chestnut Court, Manchester, NH")
+                .state("NH")
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .auctionDatetime("2026-05-01T10:00:00")
+                .insert();
+        testData.event(auctionId, "disappeared")
+                .oldValue("active")
+                .detectedAt("2026-07-14T09:00:00.000000+00:00")
+                .insert();
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"));
+
+        String html = digestService.render(
+                TEST_EMAIL,
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertFalse(html.contains("18 Chestnut Court, Manchester, NH"),
+                "auction was months old by the time the removal was detected -- should not be reported as Removed");
+    }
+
+    @Test
+    void render_suppressesRemoved_whenAuctionFarOutAndNotSaved() {
+        // Auction is still ~11 weeks out at the moment the removal was
+        // detected -- well past REMOVED_MAX_DAYS_OUT. A far-out listing
+        // pulled this early is more likely ordinary churn (postponed,
+        // relisted, corrected) than something worth reporting to a
+        // subscriber who never saved it.
+        long propertyId = testData.property()
+                .address("21 Larkspur Lane, Dover, NH")
+                .state("NH")
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .auctionDatetime("2026-10-01T10:00:00")
+                .insert();
+        testData.event(auctionId, "disappeared")
+                .oldValue("active")
+                .detectedAt("2026-07-14T09:00:00.000000+00:00")
+                .insert();
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"));
+
+        String html = digestService.render(
+                TEST_EMAIL,
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertFalse(html.contains("21 Larkspur Lane, Dover, NH"),
+                "auction was still far out when removed and not saved -- likely early-stage churn, should not be reported");
+    }
+
+    @Test
+    void render_showsRemoved_whenAuctionFarOutButSaved() {
+        // Same shape as render_suppressesRemoved_whenAuctionFarOutAndNotSaved
+        // above, but this time the subscriber explicitly saved the
+        // property -- confirming REMOVED_MAX_DAYS_OUT's saved-property
+        // bypass actually flips the outcome, not just REMOVED_MAX_AGE_DAYS's
+        // (which has no such bypass -- see that check's own comment).
+        long propertyId = testData.property()
+                .address("22 Larkspur Lane, Dover, NH")
+                .state("NH")
+                .insert();
+        long auctionId = testData.auction(propertyId)
+                .auctionDatetime("2026-10-01T10:00:00")
+                .insert();
+        testData.event(auctionId, "disappeared")
+                .oldValue("active")
+                .detectedAt("2026-07-14T09:00:00.000000+00:00")
+                .insert();
+        recordNotificationSentAt(TEST_EMAIL, OffsetDateTime.parse("2026-07-13T09:00:00+00:00"));
+        recordSavedProperty(TEST_EMAIL, propertyId, "22 Larkspur Lane, Dover, NH", "NH");
+
+        String html = digestService.render(
+                TEST_EMAIL,
+                List.of("NH"),
+                OffsetDateTime.parse("2026-07-01T00:00:00+00:00"),
+                false
+        );
+
+        assertTrue(html.contains("22 Larkspur Lane, Dover, NH"),
+                "far out when removed, but explicitly saved -- should be reported despite REMOVED_MAX_DAYS_OUT");
+        assertTrue(html.contains("class='tag'>Removed<"));
+    }
+
     // ---- Removed gating: notification history --------------------------
     //
     // A listing should only be announced as Removed if this subscriber

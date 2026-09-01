@@ -42,6 +42,35 @@ public class DigestService {
     // observation before it counts as trustworthy, not scraper noise.
     private static final int SEASONING_WINDOW_DAYS = 7;
 
+    // "Removed" is only shown on the status page if the listing's OWN
+    // auction date is within this many days of now -- regardless of
+    // event_type (disappeared or a terminal status_change) and
+    // regardless of when the removal was actually detected. Without
+    // this, a removal detected today for an auction that happened
+    // months ago (e.g. a one-time reconciliation after a scraper was
+    // fixed, or a spider outage) shows up looking like fresh news.
+    // Uniform for everyone, not just anonymous visitors -- see
+    // buildChangeGroups.
+    private static final int REMOVED_MAX_AGE_DAYS = 7;
+
+    // The forward-looking complement to REMOVED_MAX_AGE_DAYS: a listing
+    // whose auction was still more than this many days OUT at the time
+    // the removal was detected is also suppressed, UNLESS it's saved.
+    // A far-out listing pulled almost immediately is much more likely
+    // to be ordinary early-stage churn (postponed, relisted, a listing
+    // error corrected) than something worth reporting -- but if a
+    // subscriber saved it, that's exactly the kind of thing they DO
+    // want to know about, so saved properties bypass this one (unlike
+    // REMOVED_MAX_AGE_DAYS above, which has no bypass -- a months-old
+    // past auction being gone isn't "news" just because someone saved
+    // it, but a far-future one disappearing early genuinely might be).
+    // Deliberately a separate constant from ACTIVE_LISTING_CAP_DAYS
+    // even though both are 30 today -- same reasoning as
+    // SAVED_ALERT_UPCOMING_WINDOW_DAYS below: they answer different
+    // questions and shouldn't drift together just because they
+    // currently match.
+    private static final int REMOVED_MAX_DAYS_OUT = 30;
+
     // Email-only caps (truncate=true); the status page always shows
     // everything. MAX_ACTIVE_LISTINGS_EMAIL is a TOTAL cap on the
     // Upcoming Auctions section, not per-day.
@@ -579,6 +608,55 @@ public class DigestService {
             }
 
             if (wasRemoved) {
+                // When was the removal actually detected? Computed once,
+                // shared below by both the age check and the
+                // notification-history gate.
+                OffsetDateTime removalDetectedAt = group.stream()
+                        .filter(DigestService::isRemovalEvent)
+                        .map(ChangedListing::detectedAt)
+                        .filter(java.util.Objects::nonNull)
+                        .max(OffsetDateTime::compareTo)
+                        .orElse(null);
+
+                // Removed is gated on the GAP between the auction's own
+                // date and when the removal was DETECTED -- not on
+                // wall-clock "now" at render/view time. A removal
+                // detected long after the auction happened (e.g. a
+                // one-time reconciliation after a scraper outage/fix)
+                // shouldn't look like fresh news; a removal detected
+                // close to the auction date is exactly the timely case
+                // this section exists to report, and should keep
+                // reporting it correctly no matter how much later
+                // someone views the page. Comparing to real now() here
+                // was a bug, not a feature -- confirmed by
+                // DigestServiceTest's fixed-date fixtures (auction date,
+                // detectedAt, and notification-sent date all clustered
+                // together in one self-contained scenario, deliberately
+                // independent of whatever the real date happens to be
+                // when the test runs). Missing detectedAt fails open
+                // (doesn't filter), same philosophy as isSeasoned()
+                // above. Uniform for everyone; no saved-property bypass
+                // here unlike the seasoning gate above -- a months-old
+                // auction being gone isn't "news" just because someone
+                // saved it.
+                LocalDateTime auctionDateTime = first.auctionDateTime();
+                if (auctionDateTime != null && removalDetectedAt != null
+                        && auctionDateTime.isBefore(removalDetectedAt.toLocalDateTime().minusDays(REMOVED_MAX_AGE_DAYS))) {
+                    continue;
+                }
+
+                // Forward-looking complement: a listing whose auction
+                // was still more than REMOVED_MAX_DAYS_OUT days out when
+                // the removal was detected is likely ordinary early-
+                // stage churn, not something worth reporting -- unless
+                // it's saved, in which case the subscriber explicitly
+                // wants to know. Same detectedAt anchor and same
+                // fail-open-on-missing-data behavior as the check above.
+                if (!isSaved && auctionDateTime != null && removalDetectedAt != null
+                        && auctionDateTime.isAfter(removalDetectedAt.toLocalDateTime().plusDays(REMOVED_MAX_DAYS_OUT))) {
+                    continue;
+                }
+
                 if (gateRemovedOnNotificationHistory) {
                     // Only announce Removed if this subscriber was
                     // actually emailed before the removal was detected
@@ -586,14 +664,8 @@ public class DigestService {
                     // disappeared that they never knew existed. Null
                     // email (no subscriber context) counts as "never
                     // emailed".
-                    OffsetDateTime disappearedAt = group.stream()
-                            .filter(DigestService::isRemovalEvent)
-                            .map(ChangedListing::detectedAt)
-                            .filter(java.util.Objects::nonNull)
-                            .max(OffsetDateTime::compareTo)
-                            .orElse(null);
-                    boolean everEmailed = email != null && disappearedAt != null
-                            && notifications.hasSentBefore(email, disappearedAt.toInstant().toEpochMilli());
+                    boolean everEmailed = email != null && removalDetectedAt != null
+                            && notifications.hasSentBefore(email, removalDetectedAt.toInstant().toEpochMilli());
                     if (!everEmailed) {
                         continue;
                     }
