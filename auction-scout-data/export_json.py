@@ -26,6 +26,16 @@ Design notes:
   excluded_total, excluded_by_status, excluded_missing_coords) so it's
   possible to see why the exported count differs from what load_csv.py
   reported, without running a separate diagnostic script.
+- SEASONING_RULES (below) is a per-source gate applied on top of the
+  exclusions above. NOT about waiting for data to get richer -- some
+  sources (brockscott) never get richer no matter how long we wait, they
+  have no photos/terms/detail page at any point, full stop. It's about
+  (a) confidence: has a listing survived a second, independent scrape
+  confirmation, filtering out one-off parsing glitches or listings pulled
+  almost immediately; and (b) relevance: not cluttering the map with a
+  thin, unphotographed, no-terms listing that's months out and not yet
+  actionable for anyone. See SEASONING_RULES's own comment for the
+  reconfirmation mechanism and a known trade-off.
 """
 
 import json
@@ -66,6 +76,58 @@ def _normalize_path(path: str) -> str:
 # run or two without prematurely hiding still-valid listings.
 STALE_AFTER_DAYS = 14
 
+# Per-source seasoning gates, applied ON TOP of the SQL-level exclusions
+# above (status/coords/staleness/dedup already happened by the time a row
+# reaches this check). Extend this dict to add the same treatment to any
+# other low-information source later -- nothing else in this file needs
+# to change.
+#
+#   max_days_out:        exclude if auction_datetime is further out than
+#                         this many days from export time.
+#   require_reconfirmed:  exclude unless this listing has been seen in
+#                         2+ SEPARATE scrape runs.
+#
+# require_reconfirmed is derived from properties.first_seen_at /
+# last_seen_at (already tracked by load_csv.py on every ingest) rather
+# than a new counter column: both get set to the SAME run timestamp on
+# first discovery, so last_seen_at can only be later than first_seen_at
+# if a separate, later run re-confirmed the listing. last_seen_at >
+# first_seen_at is therefore exactly "seen in 2+ distinct runs" already,
+# no schema change needed.
+#
+# KNOWN TRADE-OFF: a listing first discovered already inside max_days_out
+# (e.g. found 5 days before its own sale) may never get a second scrape
+# to confirm it before the sale happens (twice-weekly cadence) -- under
+# require_reconfirmed=True, that listing simply never surfaces. This is
+# deliberate: favors confidence over completeness for these
+# lower-information sources. A rare late-discovered straggler going
+# unseen is an accepted cost, not an oversight.
+SEASONING_RULES = {
+    "brockscott": {"max_days_out": 14, "require_reconfirmed": True},
+}
+
+
+def _passes_seasoning(source, auction_date_str, first_seen_at, last_seen_at, seasoning_cutoffs):
+    """True if this row has no seasoning rule configured for its source
+    (the default -- always exportable), or satisfies whatever rule IS
+    configured. seasoning_cutoffs is {source: iso_cutoff_string},
+    precomputed once per export() call -- see there. Fails closed: a
+    missing/unparseable auction_date on a source WITH a max_days_out rule
+    does not pass, so a bad date can't accidentally bypass the gate."""
+    rule = SEASONING_RULES.get(source)
+    if not rule:
+        return True
+
+    if source in seasoning_cutoffs:
+        if not auction_date_str or auction_date_str > seasoning_cutoffs[source]:
+            return False
+
+    if rule.get("require_reconfirmed"):
+        if not first_seen_at or not last_seen_at or last_seen_at <= first_seen_at:
+            return False
+
+    return True
+
 
 def export(db_path: str, json_path: str):
     db_path = _normalize_path(db_path)
@@ -89,6 +151,15 @@ def export(db_path: str, json_path: str):
     # relying on SQLite's date-function parsing of the exact format we write.
     stale_cutoff = (datetime.now(timezone.utc) - timedelta(days=STALE_AFTER_DAYS)).isoformat()
 
+    # Same string-comparison approach as stale_cutoff above, one cutoff per
+    # source that has a max_days_out seasoning rule.
+    _now = datetime.now(timezone.utc)
+    seasoning_cutoffs = {
+        src: (_now + timedelta(days=rule["max_days_out"])).isoformat()
+        for src, rule in SEASONING_RULES.items()
+        if "max_days_out" in rule
+    }
+
     placeholders = ",".join("?" for _ in EXCLUDED_STATUSES)
     rows = conn.execute(
         f"""
@@ -101,6 +172,8 @@ def export(db_path: str, json_path: str):
             p.state,
             p.county,
             p.municipality,
+            p.first_seen_at,
+            p.last_seen_at,
             a.auction_datetime  AS auction_date,
             'scheduled'         AS status,
             a.property_type,
@@ -140,8 +213,21 @@ def export(db_path: str, json_path: str):
         ).fetchall()
 
     properties = []
+    excluded_seasoning = []
     for r in rows:
         row = dict(r)
+        first_seen_at = row.pop("first_seen_at")
+        last_seen_at = row.pop("last_seen_at")
+
+        if not _passes_seasoning(row["source"], row["auction_date"], first_seen_at,
+                                  last_seen_at, seasoning_cutoffs):
+            excluded_seasoning.append({
+                "address": row["address"], "source": row["source"],
+                "auction_date": row["auction_date"],
+                "first_seen_at": first_seen_at, "last_seen_at": last_seen_at,
+            })
+            continue
+
         # attach pdf links per property
         links = conn.execute(
             """SELECT l.url FROM auction_pdf_links l
@@ -227,6 +313,8 @@ def export(db_path: str, json_path: str):
         "excluded_disappeared": excluded_disappeared[:25],  # capped sample
         "excluded_stale_count": len(excluded_stale),
         "excluded_stale": excluded_stale[:25],  # capped sample
+        "excluded_seasoning_count": len(excluded_seasoning),
+        "excluded_seasoning": excluded_seasoning[:25],  # capped sample
     }
 
     with open(json_path, "w") as f:
@@ -262,6 +350,13 @@ def export(db_path: str, json_path: str):
             STALE_AFTER_DAYS, len(excluded_stale)))
         for r in excluded_stale[:10]:
             print("  [{}] {!r} (last seen {})".format(r["source"], r["address"], r["last_seen_at"]))
+    if excluded_seasoning:
+        print("Excluded by seasoning rule (too far out and/or not yet reconfirmed "
+              "by a second scrape): {}".format(len(excluded_seasoning)))
+        for r in excluded_seasoning[:10]:
+            print("  [{}] {!r} (auction {}, first seen {}, last seen {})".format(
+                r["source"], r["address"], r["auction_date"],
+                r["first_seen_at"], r["last_seen_at"]))
 
     conn.close()
 
