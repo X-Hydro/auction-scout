@@ -27,6 +27,17 @@ Usage:
     python run-scout.py --list                 # show what's registered,
                                                  # and which use AI
 
+Exit codes: a spider falling outside its hardcoded EXPECTED_COUNTS +/-
+COUNT_TOLERANCE_PCT range (see EXPECTED_COUNTS below) ALWAYS exits
+nonzero (3), regardless of --strict -- this is a hard, source-verified
+range, not a heuristic, so it's always treated as a failure worth
+alerting on. run_qc.py's separate adaptive "sharp drop vs recent runs"
+check only affects the exit code (2) when --strict is passed; without
+it, an adaptive warning is printed but the run still exits 0. Either way
+the run completes and writes its output first -- these only affect the
+exit code, so a scheduler/cron job can detect a bad run without it
+looking like a normal success.
+
 keenan uses AI internally, unconditionally, every run -- requires
 ANTHROPIC_API_KEY in your shell. Without it, keenan still runs and still
 produces id/url/date/status/street/city_state/description/terms (all from
@@ -122,6 +133,116 @@ KNOWN_UNAVAILABLE = {
 # Not a toggle -- there's no flag that changes a spider's AI usage, each
 # one just always does or never does.
 USES_AI = {"keenan_ai"}
+
+# ---- Expected auction counts per spider, +/- tolerance --------------------
+# A hard [min, max] band around each spider's expected count, independent
+# of run_qc.py's adaptive "sharp drop vs recent runs" check. The adaptive
+# check has a real blind spot: if a broken state (0 rows, or an abnormally
+# low count) persists for enough runs, it eventually becomes the new
+# "recent normal" and the adaptive check goes quiet -- see the ct_judicial
+# outage, where 0-row runs from 2026-08-20 through 2026-08-30 would have
+# started looking "normal" by comparison after enough of them
+# accumulated. A fixed band doesn't drift: it's set once and only moves
+# when a human deliberately updates it here. Checking an UPPER bound too
+# (not just a floor) catches a different failure mode a min-only check
+# can't: a duplicate feed, a dedupe/status-filter regression, or anything
+# else that makes a spider return MORE rows than it should -- silently
+# "good news" a min-only floor would never flag.
+#
+# EXPECTED_COUNTS is each spider's most recent CLEAN run as of
+# 2026-09-01 (see run_scout_stats.csv), not a long-run average -- several
+# spiders show real week-to-week drift (harmon: 71->107 over three weeks;
+# towne: 66->51; landmark: swings from 38 to 74), so anchoring on
+# current/recent reality tracks better than freezing to an old number.
+# "Clean" excludes runs known to be broken or outliers rather than
+# genuine inventory lows:
+#   - ct_judicial: most recent clean value is 221 (2026-09-01, right after
+#     the wrong-table-ID selector bug was fixed -- see
+#     spiders/ct_judicial.py). Excludes the 3-vs-198 same-day flapping on
+#     2026-08-11 (mid-fix noise) and the 0-row outage runs
+#     (2026-08-20 through 2026-08-30).
+#   - brockscott: most recent value is 223; excludes 2026-08-10's 107, a
+#     clear outlier against every later run sitting at 189-226 (looks
+#     like a partial/early run, not a real low).
+#   - jjmanning: most recent value is 12 (2026-09-01), the FIRST clean run
+#     after fixing a wrong top-level CSS selector
+#     ('article[class*="type-auction"]', matching a tag that never
+#     existed on the real page -- listings actually render as
+#     '<div data-elementor-type="loop-item">') that silently produced
+#     zero rows every run from 2026-08-20 through 2026-08-30 -- see
+#     spiders/jjmanning.py. This is a PROVISIONAL anchor: only one clean
+#     post-fix run exists so far (the pre-outage 6-9 baseline predates the
+#     fix and its own history is now suspect). Revisit once a few more
+#     post-fix runs establish real history.
+#
+# COUNT_TOLERANCE_PCT applies symmetrically to every spider below. Some
+# of these are already-volatile in their own recent history close to or
+# past this tolerance -- harmon (~50% growth over three weeks), landmark
+# (~35% week-over-week swing), towne (~23% three-week decline) -- worth
+# watching for false positives on ordinary variation and loosening
+# per-spider (see _expected_range()) if they turn out too tight.
+#
+# No entry for a spider name means no band is set yet (e.g. a newly added
+# spider with no history) -- check_expected_range() skips it silently
+# rather than treating "no band" as a breach.
+COUNT_TOLERANCE_PCT = 0.25
+
+EXPECTED_COUNTS = {
+    "sullivan": 41,
+    "harmon": 107,
+    "brockscott": 223,
+    "jjmanning": 12,
+    "towne": 51,
+    "patriot": 48,
+    "skypoint": 57,
+    "landmark": 74,
+    "keenan": 20,
+    "ct_judicial": 221,
+}
+
+
+def _expected_range(name, tolerance_pct=COUNT_TOLERANCE_PCT):
+    """[min, max] band for a spider, +/-tolerance_pct around its
+    EXPECTED_COUNTS entry. Returns None if no entry exists. Pass a
+    different tolerance_pct here (or add a per-spider override dict) if
+    COUNT_TOLERANCE_PCT's default 25% proves too tight/loose for a
+    specific spider once more history accumulates."""
+    expected = EXPECTED_COUNTS.get(name)
+    if expected is None:
+        return None
+    lo = round(expected * (1 - tolerance_pct))
+    hi = round(expected * (1 + tolerance_pct))
+    return lo, hi
+
+
+def check_expected_range(name, count):
+    """Hard [min, max] band check. Returns None if count is within this
+    spider's expected range, or a dict with breach details (lo, hi,
+    expected, direction) if it's outside it -- so callers can both print
+    a real-time line here AND build an itemized summary later, rather
+    than count on scrollback. Unlike run_qc.check_yield()'s adaptive
+    check, this band never moves itself and never goes quiet just
+    because a broken state persists across runs -- see the module-level
+    comment on EXPECTED_COUNTS above for why that distinction matters."""
+    bounds = _expected_range(name)
+    if bounds is None:
+        return None
+    lo, hi = bounds
+    pct = int(COUNT_TOLERANCE_PCT * 100)
+    if count < lo:
+        print(f"[{name}] ERROR: {count} auction(s) this run -- below the "
+              f"expected range ({lo}-{hi}, {EXPECTED_COUNTS[name]} +/-{pct}%).")
+        return {"lo": lo, "hi": hi, "expected": EXPECTED_COUNTS[name], "direction": "low"}
+    if count > hi:
+        print(f"[{name}] ERROR: {count} auction(s) this run -- above the "
+              f"expected range ({lo}-{hi}, {EXPECTED_COUNTS[name]} +/-{pct}%). "
+              f"An unexpectedly HIGH count can mean a duplicate feed, a "
+              f"dedupe/status-filter regression, or a genuine inventory "
+              f"spike -- worth checking before assuming it's good news.")
+        return {"lo": lo, "hi": hi, "expected": EXPECTED_COUNTS[name], "direction": "high"}
+    return None
+
+
 
 DEFAULT_OUT_PATH = "markers.csv"  # used when multiple spiders ran in one pass
 FIELDNAMES = [
@@ -426,6 +547,7 @@ def main():
 
     all_rows = []
     any_yield_warnings = False
+    range_breaches = []  # list of (spider_name, count, breach_detail_dict)
     run_date = date.today().isoformat()
     stats_this_run = []
     for spider_cls in spider_classes:
@@ -435,6 +557,9 @@ def main():
         print(f"[{spider.name}] {len(rows)} auctions after dedupe/status filter")
         if run_qc.check_yield(spider.name, len(rows), run_qc.load_recent_counts(spider.name)):
             any_yield_warnings = True
+        breach = check_expected_range(spider.name, len(rows))
+        if breach is not None:
+            range_breaches.append((spider.name, len(rows), breach))
         stats_this_run.append((spider.name, len(rows)))
         all_rows.extend(rows)
     run_qc.append_stats(run_date, stats_this_run)
@@ -509,6 +634,19 @@ def main():
         print(f"  New extractions (real API calls): {stats['api_calls']}")
         print(f"  Cache hits (no charge):            {stats['cache_hits']}")
         print(f"  Estimated cost this run:           ${stats['estimated_cost']:.4f}")
+
+    if range_breaches:
+        print(f"\nERROR: {len(range_breaches)} spider(s) fell outside their "
+              f"expected auction count range this run:")
+        for name, count, breach in range_breaches:
+            direction_word = "below" if breach["direction"] == "low" else "above"
+            print(f"  - {name}: got {count}, expected {breach['lo']}-{breach['hi']} "
+                  f"(~{breach['expected']} +/-{int(COUNT_TOLERANCE_PCT * 100)}%) "
+                  f"-- {direction_word} range")
+        print(f"These ranges are fixed, not adaptive, so this always exits "
+              f"nonzero -- regardless of --strict -- until either the "
+              f"spider is fixed or EXPECTED_COUNTS is deliberately updated.")
+        sys.exit(3)
 
     if any_yield_warnings and args.strict:
         print(f"\n--strict: exiting nonzero due to spider yield warning(s) above.")
