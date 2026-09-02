@@ -7,12 +7,13 @@ sullivan-auctioneers.com/public_docs), but is a SEPARATE site with its own
 listings -- not covered by spiders/sullivan.py.
 
 CALENDAR PAGE (discovery + status filtering):
-Each listing is a self-contained <a class="auction-list" href="/calendar-detail/?id=N">
+Each listing is a self-contained <a class="auction-list" href="/auction/N/slug/">
+(site previously used /calendar-detail/?id=N -- both patterns are matched)
 containing an <h1>ADDRESS - CITY, ST</h1>, an .auction-date div, and an
 optional .banner-wrapper > .banner (class "red" = cancelled, class "yellow"
-= postponed, ABSENT = current/active). This banner class is used for status
-detection -- not text matching -- same robustness principle as jjmanning.py's
-date-icon-box-presence check.
+= postponed, class "green" = sold, ABSENT = current/active). This banner
+class is used for status detection -- not text matching -- same robustness
+principle as jjmanning.py's date-icon-box-presence check.
 
 POSTPONED/DEDUP: same id is reused across a postponement (confirmed: id=21004
 appears both as the stale "postponed" row at the old date AND the current
@@ -90,7 +91,11 @@ class PatriotSpider(AuctionSpider):
 
         for a in soup.select("a.auction-list"):
             href = a.get("href", "")
-            m = re.search(r"id=(\d+)", href)
+            # Site moved from /calendar-detail/?id=N (query param) to
+            # /auction/N/slug/ (path segment). Try the current path-based
+            # format first, fall back to the old query-param format in case
+            # either shows up.
+            m = re.search(r"/auction/(\d+)/", href) or re.search(r"[?&]id=(\d+)", href)
             auction_id = m.group(1) if m else None
             if not auction_id:
                 continue
