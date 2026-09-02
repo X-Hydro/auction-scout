@@ -1,0 +1,25 @@
+services:
+  auction-scout-manager:
+    build:
+      context: ./auction-scout-manager
+      dockerfile: Dockerfile
+    image: auction-scout-manager
+    container_name: auction-scout-manager
+    ports:
+      - 127.0.0.1:8051:8051
+    volumes:
+      - ${AUCTION_SCOUT_DB_DIR}:/data
+    environment:
+      - AUCTIONSCOUT_DB_PATH=/data/auctionscout-manage.db
+      - AUCTIONSCOUT_PROPERTIES_DB_PATH=/data/auctionscout.db
+      - SPRING_PROFILES_ACTIVE=local
+      - SMTP_HOST=smtp.gmail.com
+      - SMTP_PORT=587
+      - SMTP_USERNAME=support@oncoord.com
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - RECAPTCHA_SECRET_KEY=${RECAPTCHA_SECRET_KEY}
+      - AUCTIONSCOUT_STRIPE_SECRET_KEY=${AUCTIONSCOUT_STRIPE_SECRET_KEY}
+      - AUCTIONSCOUT_STRIPE_PRICE_ID=${AUCTIONSCOUT_STRIPE_PRICE_ID}
+      - AUCTION_SCOUT_EMAILS_ENABLED=true
+      - AUCTIONSCOUT_APP_BASE_URL=http://localhost:8080
+    restart: "no"
