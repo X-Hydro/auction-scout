@@ -62,7 +62,7 @@ STATE_QUOTAS = {
 STATE_ORDER = ["MA", "CT", "NH", "VT", "ME"]
 
 # Only include auctions happening within this many days from "now"
-MAX_DAYS_OUT = 2
+MAX_DAYS_OUT = 4
 
 BASE_MAP_URL = "https://www.oncoord.com/auction-scout/"
 
@@ -210,7 +210,7 @@ Examples:
     parser.add_argument(
         "--input",
         type=Path,
-        default=Path("/mnt/user-data/uploads/scout-properties.json"),
+        default=Path("c:/dev/oncoord-platform/oncoord-frontend/auction-scout/scout-properties.json"),
         help="Path to scout-properties.json",
     )
     parser.add_argument(
