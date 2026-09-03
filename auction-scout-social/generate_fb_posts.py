@@ -51,6 +51,7 @@ except ImportError:
 
 # State -> max number of properties to pull for this run
 STATE_QUOTAS = {
+    "RI": 2,
     "CT": 2,
     "MA": 2,
     "ME": 1,
@@ -59,7 +60,7 @@ STATE_QUOTAS = {
 }
 
 # Order states appear in the output
-STATE_ORDER = ["MA", "CT", "NH", "VT", "ME"]
+STATE_ORDER = ["MA", "CT", "NH", "VT", "ME", "RI"]
 
 # Only include auctions happening within this many days from "now"
 MAX_DAYS_OUT = 4
