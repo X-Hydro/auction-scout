@@ -93,6 +93,7 @@ public class AdminController {
               <meta charset="UTF-8">
               <title>AuctionScout Admin</title>
               <meta http-equiv="refresh" content="600">
+              <link rel="icon" href="https://www.oncoord.com/auction-scout/assets/home-icon.webp" type="image/webp">
               <style>
                 * { box-sizing: border-box; }
                 body  { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
