@@ -19,4 +19,5 @@ services:
       - AUCTIONSCOUT_STRIPE_PRICE_ID=${AUCTIONSCOUT_STRIPE_PRICE_ID}
       - AUCTION_SCOUT_EMAILS_ENABLED=true
       - AUCTIONSCOUT_APP_BASE_URL=https://www.oncoord.com
+      - ADMIN_SECRET_TOKEN=${ADMIN_SECRET_TOKEN}
     restart: "unless-stopped"

@@ -545,6 +545,36 @@ public class SubscriberRepository {
         );
     }
 
+    public record AdminSubscriberRow(
+            String email,
+            boolean isActive,
+            Long createdAt,
+            Long subscriptionStartDate,
+            Long subscriptionEndDate,
+            String stripeSubscriptionStatus
+    ) {}
 
+    /**
+     * Read-only listing for AdminController's dashboard. Deliberately a
+     * separate query rather than reusing hasActiveAccess() per-row (same
+     * N+1 reasoning as findActiveWithAlertsEnabled()) -- the controller
+     * derives paid/trial/expired/cancelled itself from these columns
+     * using the same rules as hasActiveAccess()/deactivate().
+     */
+    public List<AdminSubscriberRow> findAllForAdmin() {
+        return jdbc.query(
+                "SELECT email, is_active, created_at, subscription_start_date, " +
+                        "subscription_end_date, stripe_subscription_status " +
+                        "FROM subscribers ORDER BY created_at DESC",
+                (rs, rowNum) -> new AdminSubscriberRow(
+                        rs.getString("email"),
+                        rs.getBoolean("is_active"),
+                        rs.getObject("created_at") != null ? rs.getLong("created_at") : null,
+                        rs.getObject("subscription_start_date") != null ? rs.getLong("subscription_start_date") : null,
+                        rs.getObject("subscription_end_date") != null ? rs.getLong("subscription_end_date") : null,
+                        rs.getString("stripe_subscription_status")
+                )
+        );
+    }
 
 }
