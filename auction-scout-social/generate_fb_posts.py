@@ -23,7 +23,8 @@ Selection rule (per user spec):
     - up to 1 property from NH
     - only auctions in the future (auction_date >= now)
     - only auctions happening within the next 2 days (auction_date <= now + 2 days)
-    - only status == "scheduled"
+    - only auctions not in a terminal status (statuses.EXCLUDED_STATUSES --
+      e.g. sold, cancelled, withdrawn, or already-past-due)
     - earliest auction_date first within each state
 
 Requires (only when --post or --cleanup is used):
@@ -41,6 +42,7 @@ Usage:
 import argparse
 import json
 import os
+import sys
 from datetime import datetime, date, timedelta
 from pathlib import Path
 
@@ -48,6 +50,13 @@ try:
     import requests
 except ImportError:
     requests = None  # only required when --post or --cleanup is used
+
+# statuses.py lives in the sibling auction-scout-data repo, not here --
+# add it to the path rather than keeping a second copy that could drift
+# out of sync with the real one.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "auction-scout-data"))
+
+from statuses import EXCLUDED_STATUSES
 
 # State -> max number of properties to pull for this run
 STATE_QUOTAS = {
@@ -63,9 +72,10 @@ STATE_QUOTAS = {
 STATE_ORDER = ["MA", "CT", "NH", "VT", "ME", "RI"]
 
 # Only include auctions happening within this many days from "now"
-MAX_DAYS_OUT = 4
+MAX_DAYS_OUT = 5
 
 BASE_MAP_URL = "https://www.oncoord.com/auction-scout/"
+STATUS_PAGE_URL = "https://www.oncoord.com/auction-scout/status.html"
 
 # Same Page ID confirmed working in generate_fp_test_post.py
 DEFAULT_PAGE_ID = "1207529282449839"
@@ -133,9 +143,13 @@ def parse_auction_date(value: str) -> datetime | None:
         return None
 
 
-def select_properties(properties: list[dict], now: datetime) -> dict[str, list[dict]]:
+def select_properties(properties: list[dict], now: datetime) -> tuple[dict[str, list[dict]], dict[str, int]]:
     """Group eligible properties by state, sorted by soonest auction first,
-    then trim each state's list to its quota."""
+    then trim each state's list to its quota.
+
+    Returns (by_state, extra_counts) -- extra_counts[state] is how many
+    eligible properties in that state didn't make the cut, for the "+N
+    more" teaser in the post."""
     cutoff = now + timedelta(days=MAX_DAYS_OUT)
     by_state: dict[str, list[dict]] = {state: [] for state in STATE_QUOTAS}
 
@@ -143,26 +157,47 @@ def select_properties(properties: list[dict], now: datetime) -> dict[str, list[d
         state = prop.get("state")
         if state not in STATE_QUOTAS:
             continue
-        if prop.get("status") != "scheduled":
+        # Blocklist, not allowlist -- "scheduled" never actually appears in
+        # your data (sources use "active", "postponed", etc.). This checks
+        # against the real terminal statuses in statuses.py instead of one
+        # hardcoded "good" word.
+        if prop.get("status") in EXCLUDED_STATUSES:
             continue
         dt = parse_auction_date(prop.get("auction_date"))
         if dt is None or dt < now or dt > cutoff:
+            continue
+        if dt.date() == now.date():
             continue
         if prop.get("latitude") is None or prop.get("longitude") is None:
             continue
         by_state[state].append(prop)
 
+    extra_counts: dict[str, int] = {}
     for state, props in by_state.items():
         props.sort(key=lambda p: parse_auction_date(p["auction_date"]))
-        by_state[state] = props[: STATE_QUOTAS[state]]
+        quota = STATE_QUOTAS[state]
+        extra_counts[state] = max(0, len(props) - quota)
+        by_state[state] = props[:quota]
 
-    return by_state
+    return by_state, extra_counts
 
 
 def build_map_url(prop: dict) -> str:
     lat = prop["latitude"]
     lng = prop["longitude"]
     return f"{BASE_MAP_URL}?lat={lat}&lng={lng}&zoom=16"
+
+
+def format_teaser(state: str, extra: int) -> str:
+    """One-line call-to-action appended after a state's listings when more
+    eligible auctions exist than the quota showed. Links to that state's
+    filtered view on the status page, not the generic homepage."""
+    noun = "auction" if extra == 1 else "auctions"
+    teaser_url = f"{STATUS_PAGE_URL}?states={state}"
+    return (
+        f"📍 +{extra} more upcoming {state} {noun} on AuctionScout\n"
+        f"{teaser_url}"
+    )
 
 
 def format_post(prop: dict) -> str:
@@ -286,16 +321,29 @@ Examples:
         return
 
     properties = load_properties(args.input)
-    by_state = select_properties(properties, now)
+    by_state, extra_counts = select_properties(properties, now)
 
     selected_props = [prop for state in STATE_ORDER for prop in by_state.get(state, [])]
     posts = [format_post(prop) for prop in selected_props]
 
-    # All selected posts, joined into a single Facebook post
-    output_text = "\n\n".join(posts)
+    # Combined post text: each state's listings followed by a "+N more"
+    # teaser if there were more eligible auctions than the quota showed.
+    # Built separately from `posts` above -- teasers aren't real listings,
+    # so they stay out of the log/expiration math further down.
+    blocks = []
+    for state in STATE_ORDER:
+        for prop in by_state.get(state, []):
+            blocks.append(format_post(prop))
+        extra = extra_counts.get(state, 0)
+        if extra:
+            blocks.append(format_teaser(state, extra))
+    output_text = "\n\n".join(blocks)
 
     print(f"# Generated {len(posts)} listing(s) as of {now.isoformat()}")
-    print(f"# Per-state counts: " + ", ".join(f"{s}={len(by_state.get(s, []))}" for s in STATE_ORDER))
+    print(f"# Per-state counts: " + ", ".join(
+        f"{s}={len(by_state.get(s, []))}" + (f" (+{extra_counts.get(s, 0)} more)" if extra_counts.get(s, 0) else "")
+        for s in STATE_ORDER
+    ))
     print()
     print(output_text)
 

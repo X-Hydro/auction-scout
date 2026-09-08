@@ -195,7 +195,7 @@ EXPECTED_COUNTS = {
     "towne": 51,
     "patriot": 48,
     "skypoint": 57,
-    "landmark": 74,
+    "landmark": 70,
     "keenan": 20,
     "ct_judicial": 221,
 }

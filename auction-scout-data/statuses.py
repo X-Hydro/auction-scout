@@ -35,3 +35,37 @@ PAST_DUE_STATUS = "completed"
 # Everything that should be excluded from the live map export -- both
 # statuses a source told us about directly, and the one load_csv.py infers.
 EXCLUDED_STATUSES = EXPLICIT_TERMINAL_STATUSES + (PAST_DUE_STATUS,)
+
+# The single canonical value load_csv.py writes to auctions.status for any
+# raw source status that ISN'T explicitly terminal -- collapsing "on_time",
+# "live", "scheduled", or whatever else a given site happens to call a
+# still-upcoming auction into one value every consumer (frontend, digest
+# emails, generate_fb_posts.py, ad-hoc SQL) can rely on. "active" rather
+# than "scheduled" deliberately -- it's already the dominant raw wording
+# across sources (the vast majority of live rows), so this is the value
+# other parts of the app (frontend, admin dashboard) are most likely to
+# already assume, and it requires the least actual change to the data.
+ACTIVE_STATUS = "active"
+
+
+def normalize_status(raw_status: str) -> str:
+    """
+    Collapse a source's free-text "still on" wording into ACTIVE_STATUS.
+
+    Deliberately derived from EXCLUDED_STATUSES rather than a hand-maintained
+    list of "live" synonyms ("active", "on_time", ...) -- an allowlist like
+    that has to anticipate every future source's wording in advance, and a
+    source using an unanticipated word silently falls through the cracks
+    (see: the Landmark "active" bug this was written to fix). Terminal
+    wording is a small, closed, and individually meaningful vocabulary
+    (sold vs. cancelled vs. withdrawn), so it's cheap to enumerate and worth
+    keeping distinct -- that's what EXCLUDED_STATUSES already does. Anything
+    NOT in it is, by definition, still on, so it's safe to collapse.
+
+    The raw text itself isn't lost -- see auctions.status_raw, which
+    load_csv.py stores alongside this normalized value.
+    """
+    raw_status = (raw_status or "").strip().lower()
+    if raw_status in EXCLUDED_STATUSES:
+        return raw_status
+    return ACTIVE_STATUS

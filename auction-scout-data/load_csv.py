@@ -27,7 +27,7 @@ from urllib.parse import urlparse, parse_qs
 from dateutil import parser as dateparser
 
 from dedup import coord_key, winning_source
-from statuses import EXCLUDED_STATUSES, PAST_DUE_STATUS
+from statuses import EXCLUDED_STATUSES, normalize_status, PAST_DUE_STATUS
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -522,7 +522,7 @@ def load(csv_path: str, db_path: str):
                 summary = _clean_summary(row.get("Summary"))
                 metadata_json = _validate_metadata_json(row.get("Metadata"), row.get("Name", ""))
                 auction_dt = parse_auction_datetime(row["Auction Date/Time"])
-                status = row["Status"].strip().lower()
+                status = normalize_status(row["Status"].strip().lower())
 
                 state = (row.get("State") or "").strip()
                 county = (row.get("County") or "").strip()
