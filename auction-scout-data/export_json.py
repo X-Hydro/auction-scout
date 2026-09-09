@@ -82,28 +82,40 @@ STALE_AFTER_DAYS = 14
 # other low-information source later -- nothing else in this file needs
 # to change.
 #
-#   max_days_out:        exclude if auction_datetime is further out than
-#                         this many days from export time.
-#   require_reconfirmed:  exclude unless this listing has been seen in
-#                         2+ SEPARATE scrape runs.
+# Mirrors DigestService.isSeasoned() (Java, gates status.html) --
+# deliberately, not coincidentally. These two used to implement genuinely
+# different rules: two independent gates here (far-out alone was enough
+# to exclude, no matter how much confirmed history a listing had) vs. one
+# combined condition there (confirmed history can rescue a far-out
+# listing). That's why a well-confirmed, far-out brockscott listing could
+# show as a change on status.html while staying invisible on the map.
+# Java's formula is now the canonical one -- simpler to explain to a
+# customer ("shows once it's close, or once we've confirmed it's
+# stable"), and it already has test coverage (DigestServiceTest) this
+# file doesn't. If you change window_days or the combining logic, change
+# it in both places -- there's no shared config between this pipeline
+# and that service, so nothing enforces they match except this comment.
 #
-# require_reconfirmed is derived from properties.first_seen_at /
-# last_seen_at (already tracked by load_csv.py on every ingest) rather
+#   window_days: a listing is excluded only if it's BOTH further out
+#                than this many days from export time AND hasn't been
+#                reconfirmed by a second scrape at least window_days
+#                after it was first seen. Enough confirmed history
+#                rescues a far-out listing.
+#
+# The reconfirmation half of this is derived from properties.first_seen_at
+# / last_seen_at (already tracked by load_csv.py on every ingest) rather
 # than a new counter column: both get set to the SAME run timestamp on
 # first discovery, so last_seen_at can only be later than first_seen_at
-# if a separate, later run re-confirmed the listing. last_seen_at >
-# first_seen_at is therefore exactly "seen in 2+ distinct runs" already,
-# no schema change needed.
+# if a separate, later run re-confirmed the listing.
 #
-# KNOWN TRADE-OFF: a listing first discovered already inside max_days_out
-# (e.g. found 5 days before its own sale) may never get a second scrape
-# to confirm it before the sale happens (twice-weekly cadence) -- under
-# require_reconfirmed=True, that listing simply never surfaces. This is
-# deliberate: favors confidence over completeness for these
-# lower-information sources. A rare late-discovered straggler going
-# unseen is an accepted cost, not an oversight.
+# One deliberate difference from the Java side, NOT ported here: Java
+# fails OPEN on a missing timestamp (treats it as seasoned); this still
+# fails CLOSED on a missing/unparseable auction_date (excludes rather
+# than shows). That's a separate, more consequential decision -- risk of
+# showing something that shouldn't show vs. hiding something that
+# should -- than the far-out/reconfirmation trade-off this mirrors.
 SEASONING_RULES = {
-    "brockscott": {"max_days_out": 14, "require_reconfirmed": True},
+    "brockscott": {"window_days": 7},
 }
 
 
@@ -111,22 +123,26 @@ def _passes_seasoning(source, auction_date_str, first_seen_at, last_seen_at, sea
     """True if this row has no seasoning rule configured for its source
     (the default -- always exportable), or satisfies whatever rule IS
     configured. seasoning_cutoffs is {source: iso_cutoff_string},
-    precomputed once per export() call -- see there. Fails closed: a
-    missing/unparseable auction_date on a source WITH a max_days_out rule
-    does not pass, so a bad date can't accidentally bypass the gate."""
+    precomputed once per export() call -- see there. Fails closed on a
+    missing/unparseable auction_date, first_seen_at, or last_seen_at: a
+    bad/missing timestamp can't accidentally bypass the gate. See
+    SEASONING_RULES's comment for the formula and the Java cross-
+    reference."""
     rule = SEASONING_RULES.get(source)
     if not rule:
         return True
 
-    if source in seasoning_cutoffs:
-        if not auction_date_str or auction_date_str > seasoning_cutoffs[source]:
-            return False
+    far_out = not auction_date_str or auction_date_str > seasoning_cutoffs[source]
+    if not far_out:
+        return True
 
-    if rule.get("require_reconfirmed"):
-        if not first_seen_at or not last_seen_at or last_seen_at <= first_seen_at:
-            return False
+    if not first_seen_at or not last_seen_at:
+        return False
 
-    return True
+    window = rule["window_days"]
+    first_seen_dt = datetime.fromisoformat(first_seen_at)
+    last_seen_dt = datetime.fromisoformat(last_seen_at)
+    return last_seen_dt >= first_seen_dt + timedelta(days=window)
 
 
 def export(db_path: str, json_path: str):
@@ -152,12 +168,11 @@ def export(db_path: str, json_path: str):
     stale_cutoff = (datetime.now(timezone.utc) - timedelta(days=STALE_AFTER_DAYS)).isoformat()
 
     # Same string-comparison approach as stale_cutoff above, one cutoff per
-    # source that has a max_days_out seasoning rule.
+    # source with a seasoning rule.
     _now = datetime.now(timezone.utc)
     seasoning_cutoffs = {
-        src: (_now + timedelta(days=rule["max_days_out"])).isoformat()
+        src: (_now + timedelta(days=rule["window_days"])).isoformat()
         for src, rule in SEASONING_RULES.items()
-        if "max_days_out" in rule
     }
 
     placeholders = ",".join("?" for _ in EXCLUDED_STATUSES)
@@ -351,7 +366,7 @@ def export(db_path: str, json_path: str):
         for r in excluded_stale[:10]:
             print("  [{}] {!r} (last seen {})".format(r["source"], r["address"], r["last_seen_at"]))
     if excluded_seasoning:
-        print("Excluded by seasoning rule (too far out and/or not yet reconfirmed "
+        print("Excluded by seasoning rule (too far out AND not yet reconfirmed "
               "by a second scrape): {}".format(len(excluded_seasoning)))
         for r in excluded_seasoning[:10]:
             print("  [{}] {!r} (auction {}, first seen {}, last seen {})".format(

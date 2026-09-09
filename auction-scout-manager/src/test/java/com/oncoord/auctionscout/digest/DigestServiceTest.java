@@ -670,7 +670,7 @@ class DigestServiceTest {
                 "nothing is \"coming\" for a listing that's already gone -- the cell should be empty, not this label");
     }
 
-  
+
     @Test
     void render_suppressesRemoved_whenAuctionMuchOlderThanDetection() {
         // Auction happened back in May; the removal wasn't detected
@@ -1074,7 +1074,7 @@ class DigestServiceTest {
                 .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
                 .insert();
         long auctionId = testData.auction(propertyId)
-                .auctionDatetime("2026-09-15T10:00:00") // well beyond the 7-day window
+                .auctionDatetime("2027-09-15T10:00:00") // well beyond the 7-day window
                 .insert();
         testData.event(auctionId, "first_seen")
                 .newValue("active")
@@ -1100,7 +1100,7 @@ class DigestServiceTest {
                 // apart -- well past the 7-day seasoning bar.
                 .insert();
         long auctionId = testData.auction(propertyId)
-                .auctionDatetime("2026-09-15T10:00:00")
+                .auctionDatetime("2027-09-15T10:00:00")
                 .insert();
         testData.event(auctionId, "first_seen")
                 .newValue("active")
@@ -1239,7 +1239,7 @@ class DigestServiceTest {
                 .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
                 .insert();
         long auctionId = testData.auction(propertyId)
-                .auctionDatetime("2026-09-15T10:00:00") // well beyond the 7-day window
+                .auctionDatetime("2027-09-15T10:00:00") // well beyond the 7-day window
                 .insert();
         testData.event(auctionId, "first_seen")
                 .newValue("active")
@@ -1277,10 +1277,10 @@ class DigestServiceTest {
                 .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
                 .insert();
         long savedAuctionId = testData.auction(savedPropertyId)
-                .auctionDatetime("2026-09-15T10:00:00")
+                .auctionDatetime("2027-09-15T10:00:00")
                 .insert();
         long unsavedAuctionId = testData.auction(unsavedPropertyId)
-                .auctionDatetime("2026-09-15T10:00:00")
+                .auctionDatetime("2027-09-15T10:00:00")
                 .insert();
         testData.event(savedAuctionId, "first_seen").newValue("active").insert();
         testData.event(unsavedAuctionId, "first_seen").newValue("active").insert();
@@ -1554,11 +1554,11 @@ class DigestServiceTest {
                 .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
                 .insert();
         long auctionId = testData.auction(propertyId)
-                .auctionDatetime("2026-09-15T10:00:00") // well beyond the 7-day window
+                .auctionDatetime("2027-09-15T10:00:00") // well beyond the 7-day window
                 .insert();
         testData.event(auctionId, "date_change")
                 .oldValue("2026-09-01T10:00:00")
-                .newValue("2026-09-15T10:00:00")
+                .newValue("2027-09-15T10:00:00")
                 .detectedAt("2026-07-14T09:00:00.000000+00:00")
                 .insert();
 
@@ -1572,7 +1572,7 @@ class DigestServiceTest {
                 "a saved property should generate an alert even far out and unseasoned -- "
                         + "the alert's whole input list is inherently the saved set");
         assertTrue(html.contains("11 Quarry Road, Nashua, NH"));
-        assertTrue(html.contains("2026-09-01 → 2026-09-15"));
+        assertTrue(html.contains("2026-09-01 → 2027-09-15"));
     }
 
 
@@ -1663,7 +1663,7 @@ class DigestServiceTest {
                 .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
                 .insert();
         long auctionId = testData.auction(propertyId)
-                .auctionDatetime("2026-09-15T10:00:00")
+                .auctionDatetime("2027-09-15T10:00:00")
                 .insert();
         testData.event(auctionId, "first_seen")
                 .newValue("active")
@@ -1692,7 +1692,7 @@ class DigestServiceTest {
                 .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
                 .insert();
         long auctionId = testData.auction(propertyId)
-                .auctionDatetime("2026-09-15T10:00:00")
+                .auctionDatetime("2027-09-15T10:00:00")
                 .insert();
         testData.event(auctionId, "first_seen")
                 .newValue("active")
