@@ -37,9 +37,14 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 import requests
+import urllib3
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 from requests.utils import requote_uri
+
+# Only fires when a spider explicitly sets verify_ssl = False (see
+# AuctionSpider.verify_ssl below) -- a no-op for every other spider.
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 DATE_CHUNK_RE = re.compile(
@@ -281,6 +286,12 @@ class AuctionSpider(ABC):
     # spiders/harmon.py for a real example of when/why this was used.
     respect_robots = True
 
+    # Default: verify TLS certs on every request. Set to False in a specific
+    # spider ONLY when the site's cert is broken but the site itself is known
+    # good (visually confirmed) -- explain why at the override, same pattern
+    # as respect_robots above. See spiders/towne.py for the current example.
+    verify_ssl = True
+
     def __init__(self):
         if not self.respect_robots:
             print(f"[{self.name}] respect_robots=False -- robots.txt check "
@@ -292,7 +303,10 @@ class AuctionSpider(ABC):
         robots_url = urljoin(self.base_url, "/robots.txt")
         try:
             resp = requests.get(
-                robots_url, headers={"User-Agent": self.user_agent}, timeout=15
+                robots_url,
+                headers={"User-Agent": self.user_agent},
+                timeout=15,
+                verify=self.verify_ssl,
             )
             if resp.status_code == 200:
                 self._robots.parse(resp.text.splitlines())
@@ -357,7 +371,10 @@ class AuctionSpider(ABC):
         for attempt in range(1, self.get_soup_max_attempts + 1):
             try:
                 resp = requests.get(
-                    url, headers={"User-Agent": self.user_agent}, timeout=20
+                    url,
+                    headers={"User-Agent": self.user_agent},
+                    timeout=20,
+                    verify=self.verify_ssl,
                 )
                 break
             except (requests.exceptions.ConnectionError,

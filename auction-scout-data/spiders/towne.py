@@ -79,6 +79,15 @@ class TowneAuctionSpider(AuctionSpider):
     base_url = "https://currentauctions.towneauction.com"
     scrape_details = False  # everything is on the one table page
 
+    # Towne's HTTPS certificate is currently invalid/untrusted (confirmed
+    # in-browser: ERR_CERT_AUTHORITY_INVALID). The site itself is reachable
+    # and serves the expected auction table -- this is a broken cert on
+    # their end, not an MITM/interception issue on ours. Keep SSL
+    # verification enabled for every other spider; this is an explicit,
+    # scoped exception. Re-check periodically and remove once Towne fixes
+    # their cert.
+    verify_ssl = False
+
     def listing_urls(self):
         return [self.base_url + "/"]
 
