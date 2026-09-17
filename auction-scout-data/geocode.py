@@ -302,6 +302,14 @@ def chunked(items, size):
         yield items[i:i + size]
 
 
+def _looks_geocodable(addr):
+    """False for an address that's empty or reduces to nothing after
+    stripping commas/whitespace (e.g. ", ") -- these can never resolve
+    via Census or Nominatim, so there's no reason to spend an API call
+    finding that out."""
+    return bool(re.sub(r"[,\s]+", "", addr or ""))
+
+
 def geocode_nominatim(address):
     """
     Single-address fallback geocoder.
@@ -432,6 +440,20 @@ def geocode_with_fallbacks(
     if not remaining:
         return coords, []
 
+    # Blank/comma-only addresses can never resolve via any geocoder --
+    # route them straight to still_unmatched instead of spending a
+    # Census/Nominatim call finding that out every run.
+    blank = [(aid, addr) for aid, addr in remaining if not _looks_geocodable(addr)]
+    remaining = [(aid, addr) for aid, addr in remaining if _looks_geocodable(addr)]
+
+    if blank:
+        print(f"Skipping {len(blank)} blank/unusable address(es) "
+              f"(no Census/Nominatim call made): "
+              f"{', '.join(aid for aid, _ in blank)}")
+
+    if not remaining:
+        return coords, blank
+
     # 2. Census batch geocoder, in chunks. Each chunk is wrapped
     #    independently because this endpoint is known to time out / return
     #    inconsistent results under load (no published Census SLA) -- a
@@ -494,7 +516,7 @@ def geocode_with_fallbacks(
 
         time.sleep(nominatim_delay)
 
-    return coords, still_unmatched
+    return coords, still_unmatched + blank
 
 
 def reverse_geocode_geography(lat, lon):
