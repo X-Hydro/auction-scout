@@ -58,6 +58,13 @@ def classify_timing(dt, upcoming_window_days=7):
     classify it as 'This Week' / 'Later' / 'Past' / 'Unknown'."""
     if dt is None:
         return "Unknown"
+    if dt.tzinfo is not None:
+        # dateutil's fuzzy=True parsing can occasionally latch onto stray
+        # text that looks like a UTC offset (e.g. "GMT-0400") and return a
+        # tz-aware datetime. Every spider's parsed date lands here, so
+        # normalize to naive once, in this one shared place, rather than
+        # guarding every call site that parses a date.
+        dt = dt.replace(tzinfo=None)
     delta_days = (dt - datetime.now()).total_seconds() / 86400
     if delta_days < 0:
         return "Past"
