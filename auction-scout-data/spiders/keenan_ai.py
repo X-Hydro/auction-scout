@@ -151,62 +151,40 @@ def _extra_fields_to_json(extra_fields):
 _HEADER_RE = re.compile(r"^Real Estate Foreclosure Auction\b", re.IGNORECASE)
 _PARCEL_LABEL_RE = re.compile(r"To View Auction Parcel\s+(\d+)\s*-\s*(.+)$", re.IGNORECASE)
 
-# Some detail pages (confirmed: sequential-slot parcels within a
-# portfolio auction) show a start-end time range on the date line, e.g.
-# "October 7, 2026 10:30 AM - 11:30 AM", rather than a bare timestamp.
-# dateutil's fuzzy parser doesn't reject the trailing "- 11:30" -- it
-# silently reads it as a UTC offset instead of an end time, producing a
-# garbage tz-aware datetime. Strip a trailing time-range tail before
-# parsing so only the (real) start time reaches dateutil.
+# A trailing start-end time range (e.g. "10:30 AM - 11:30 AM") makes
+# dateutil's fuzzy parser misread the "- 11:30" as a UTC offset instead
+# of an end time. Strip it before parsing.
 _TIME_RANGE_TAIL_RE = re.compile(r"\s*-\s*\d{1,2}:\d{2}\s*(?:AM|PM)?\s*$", re.IGNORECASE)
 
-# Confirmed on portfolio sub-listing/parcel detail pages: the position
-# where the real auction date normally sits instead holds a "PREVIEW
-# DATE: ..." announcement (a property-viewing window, not the auction).
-# This isn't a dateutil parse failure -- fuzzy-parsing a preview line
-# still "succeeds", just against the wrong event -- so it has to be
-# caught explicitly rather than left to the try/except below.
+# A PREVIEW DATE line can land where the real auction date is expected;
+# fuzzy-parsing it still "succeeds", just against the wrong event, so it
+# has to be rejected explicitly.
 _PREVIEW_LINE_RE = re.compile(r"^\s*PREVIEW\b", re.IGNORECASE)
 
-# The reliable signal, when present: an explicit "AUCTION DATE:" line
-# (colon spacing and case both vary -- "AUCTION DATE:Wed...", "AUCTION
-# DATE: Wed...", "Auction Date: ~~Wed...~~ POSTPONED..." all appear).
-# Confirmed to sit at very different positions across listing templates
-# (portfolio parcel pages add extra lines -- "Auction Parcel #N", a
-# 2-line description -- before it), so this is searched for across
-# every line after the header rather than trusted at a fixed index.
+# Colon spacing/case both vary ("AUCTION DATE:Wed...", "Auction Date: ~~Wed...~~ POSTPONED...").
 _AUCTION_DATE_LINE_RE = re.compile(r"^AUCTION DATE:?\s*(.*)$", re.IGNORECASE)
 
-# Per Thale: this exact phrase (or a close variant using the same four
-# words in order, e.g. "postponed until further notice due to a
-# Bankruptcy Filing") appearing ANYWHERE on the page means the auction
-# is effectively cancelled. It can sit on its own line, separate from
-# the date line itself, so this is checked against the whole page text
-# rather than tied to whatever line the date came from.
+# This phrase (or a close variant, e.g. "postponed until further notice
+# due to a Bankruptcy Filing") anywhere on the page means the auction is
+# cancelled. Checked against the whole page since it can sit on its own
+# line, separate from the date.
 _POSTPONED_TEXT_RE = re.compile(r"POSTPONED\s+UNTIL\s+FURTHER\s+NOTICE", re.IGNORECASE)
 
-# Cuts a trailing "POSTPONED ..." notice off of an auction-date line
-# once it's served its purpose as a cancellation signal above -- it
-# isn't part of the date and would otherwise ride along into the
-# parser as fuzzy-parser noise.
+# Drops a trailing "POSTPONED ..." notice riding along on the same line
+# as a date -- not part of the date, just fuzzy-parser noise.
 _POSTPONED_CUTOFF_RE = re.compile(r"\s*POSTPONED\b.*", re.IGNORECASE)
 
-# Some "postponed" listings actually give a specific new date rather than
-# an indefinite hold, e.g. "Auction is being postponed until Friday,
-# October 16th at 11AM." -- distinct from the original (often
-# strikethrough) date elsewhere on the page, which is now stale. Checked
-# ahead of everything else: when the text after "postponed until" parses
-# as a real date, that's the current, authoritative one and the listing
-# is NOT cancelled. When it doesn't parse (e.g. "...until further notice
-# due to a Bankruptcy Filing"), this naturally falls through to the
-# indefinite-postponement handling below -- no separate case needed to
-# tell the two apart.
+# Some postponements give a real new date ("...postponed until Friday,
+# October 16th at 11AM") rather than an indefinite hold. When the text
+# after "postponed until" parses as a date, that's authoritative and the
+# listing isn't cancelled; when it doesn't (e.g. "...until further
+# notice"), this falls through to the indefinite case above with no
+# extra branching needed.
 _RESCHEDULE_RE = re.compile(r"postponed\s+until\s+(.+)", re.IGNORECASE)
 
 
 def _format_auction_dt(dt):
-    """'Wed, Oct 21 at 3:00 PM' -- matches the plain format Keenan's own
-    list-page dates already use. Avoids %-d/%-I (unsupported on Windows)."""
+    """'Wed, Oct 21 at 3:00 PM' -- avoids %-d/%-I (unsupported on Windows)."""
     return f"{dt.strftime('%a, %b')} {dt.day} at {dt.strftime('%I:%M %p').lstrip('0')}"
 
 
@@ -360,10 +338,9 @@ class KeenanAISpider(AuctionSpider):
 
         result = {}
 
-        # Check for a specific-date reschedule first -- it supersedes any
-        # other date on the page (including a struck-through original) and
-        # means the listing is NOT cancelled, so nothing below should run
-        # if this succeeds.
+        # A specific-date reschedule supersedes any other date on the page
+        # (including a struck-through original), and means the listing
+        # isn't cancelled -- so nothing below runs if this succeeds.
         reschedule_dt = None
         for ln in lines[1:]:
             m = _RESCHEDULE_RE.search(ln)
@@ -384,19 +361,11 @@ class KeenanAISpider(AuctionSpider):
             result["auction_dt"] = reschedule_dt
             result["timing"] = classify_timing(reschedule_dt)
         else:
-            # "POSTPONED UNTIL FURTHER NOTICE" (or a close variant) anywhere
-            # on the page means the auction is effectively cancelled --
-            # checked independent of the date line, since it can sit on its
-            # own line.
             if _POSTPONED_TEXT_RE.search(" ".join(lines)):
                 result["status"] = "postponed"
 
-            # Prefer an explicit "Auction Date:" line wherever it appears --
-            # unambiguous, and confirmed to sit at very different positions
-            # across templates (portfolio parcel pages insert extra lines --
-            # "Auction Parcel #N", a 2-line description -- before it, which
-            # is exactly what was landing the street address itself in
-            # "date_time" under the old fixed-index approach).
+            # Search every line for the label rather than trusting a fixed
+            # index -- different templates put it in different places.
             auction_date_text = None
             for ln in lines[1:]:
                 m = _AUCTION_DATE_LINE_RE.match(ln)
@@ -404,30 +373,20 @@ class KeenanAISpider(AuctionSpider):
                     auction_date_text = m.group(1)
                     break
 
-            # Fall back to the old fixed-index heuristic only for templates
-            # with no explicit label at all (confirmed to exist alongside
-            # the labeled ones -- e.g. some single-property listings just
-            # show a bare date). Still guard against PREVIEW DATE landing
-            # there.
+            # No label at all -- fall back to the old positional guess,
+            # still guarding against a PREVIEW line landing there instead.
             if auction_date_text is None and len(lines) > 4 and not _PREVIEW_LINE_RE.match(lines[4]):
                 auction_date_text = lines[4]
 
             if auction_date_text:
-                # Strip literal strikethrough markers if present, and drop
-                # any trailing "POSTPONED ..." notice riding along on the
-                # same line -- it already did its job above and isn't part
-                # of the date. Also guard against a trailing time range
-                # (e.g. "10:30 AM - 11:30 AM") that dateutil's fuzzy parser
-                # can misread as a UTC offset instead of an end time.
                 cleaned = auction_date_text.replace("~", " ")
                 cleaned = _POSTPONED_CUTOFF_RE.sub("", cleaned)
                 cleaned = _TIME_RANGE_TAIL_RE.sub("", cleaned)
                 try:
                     detail_dt = date_parser.parse(cleaned, fuzzy=True)
                     if detail_dt.tzinfo is not None:
-                        # Keenan never publishes a real UTC offset. Any
-                        # tzinfo here means dateutil misread something as
-                        # an offset.
+                        # Keenan never publishes a real UTC offset -- any
+                        # tzinfo here means a misparse, not real data.
                         detail_dt = detail_dt.replace(tzinfo=None)
                     result["date_time"] = _format_auction_dt(detail_dt)
                     result["auction_dt"] = detail_dt

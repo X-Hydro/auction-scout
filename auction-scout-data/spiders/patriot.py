@@ -46,6 +46,12 @@ from base import AuctionSpider, classify_timing, clean_url
 
 STATUS_PRIORITY = {"active": 2, "postponed": 1}
 
+# The detail page marks cancellation in its own text ("Cancelled" in
+# Property Details, "CANCELLED" under the date) -- a cross-check against
+# the calendar page's banner (parse_listing), which is the primary signal
+# but can go stale between scrapes.
+_CANCELLED_RE = re.compile(r"\bcancell?ed\b", re.IGNORECASE)
+
 
 def _parse_no_year_date(text, reference=None):
     """Dates on this site never include a year. Parse assuming 'reference'
@@ -202,5 +208,13 @@ class PatriotSpider(AuctionSpider):
                 result["date_time"] = detail_date_text
                 result["auction_dt"] = dt
                 result["timing"] = classify_timing(dt)
+
+        # Cross-check the detail page's own cancellation text against
+        # whatever the calendar page's banner said (see _CANCELLED_RE
+        # above for why). Checked in both boxes independently since either
+        # can carry it alone.
+        if (details_box and _CANCELLED_RE.search(details_box.get_text(" ", strip=True))) or \
+           (date_box and _CANCELLED_RE.search(date_box.get_text(" ", strip=True))):
+            result["status"] = "cancelled"
 
         return result
