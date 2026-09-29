@@ -194,7 +194,7 @@ EXPECTED_COUNTS = {
     "jjmanning": 12,
     "towne": 51,
     "patriot": 48,
-    "skypoint": 57,
+    "skypoint": 10,
     "landmark": 70,
     "keenan": 27,
     "ct_judicial": 221,

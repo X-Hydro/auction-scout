@@ -32,9 +32,17 @@ EXPLICIT_TERMINAL_STATUSES = (
 # makes locally based on the clock, not something scraped from a page.
 PAST_DUE_STATUS = "completed"
 
-# Everything that should be excluded from the live map export -- both
-# statuses a source told us about directly, and the one load_csv.py infers.
-EXCLUDED_STATUSES = EXPLICIT_TERMINAL_STATUSES + (PAST_DUE_STATUS,)
+# Status for a row retired by hand because it's the losing side of a
+# cross-source duplicate that existed in the DB before its source pair
+# was added to dedup.py's DEDUP_SOURCE_PRIORITY (load_csv.py only drops
+# losers at ingest; it never touches rows already stored). Like
+# PAST_DUE_STATUS, no source ever says this. Not a statement that the
+# auction is over -- the winning source's row is still live.
+DUPLICATE_STATUS = "duplicate"
+
+# Everything that should be excluded from the live map export -- statuses
+# a source told us about directly, plus the ones assigned locally.
+EXCLUDED_STATUSES = EXPLICIT_TERMINAL_STATUSES + (PAST_DUE_STATUS, DUPLICATE_STATUS)
 
 # The single canonical value load_csv.py writes to auctions.status for any
 # raw source status that ISN'T explicitly terminal -- collapsing "on_time",

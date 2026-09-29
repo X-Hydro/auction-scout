@@ -16,11 +16,6 @@ with the latest auction date referenced in that post. Run with --cleanup
 any logged post whose auctions have all already happened.
 
 Selection rule (per user spec):
-    - up to 2 properties from CT
-    - up to 2 properties from MA
-    - up to 1 property from ME
-    - up to 1 property from VT
-    - up to 1 property from NH
     - only auctions in the future (auction_date >= now)
     - only auctions happening within the next 2 days (auction_date <= now + 2 days)
     - only auctions not in a terminal status (statuses.EXCLUDED_STATUSES --
@@ -65,7 +60,7 @@ STATE_QUOTAS = {
     "MA": 2,
     "ME": 1,
     "VT": 1,
-    "NH": 1,
+    "NH": 2,
 }
 
 # Order states appear in the output

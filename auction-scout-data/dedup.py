@@ -18,29 +18,21 @@ as the landmark/brockscott and harmon/patriot entries below.
 
 import re
 
-# Confirmed overlaps:
-#   - landmark / brockscott: 2026-07-30 (see run-scout.py history)
-#   - harmon / patriot: 2026-08 -- e.g. "65 Cecelia Terrace, Pittsfield, MA"
-#     and "59 Denver Street, Fall River, MA" both listed independently by
-#     both sources with identical geocoded coordinates. Explains why they
-#     overlap at all: Harmon Law owns Patriot, so Patriot listings are
-#     largely a subset/mirror of Harmon's own auctions.
-#   - brockscott / patriot: 2026-08 -- 19 same-coordinate matches surfaced
-#     by migrate_properties_dedup.py's skipped-groups output in one run,
-#     clearly systemic rather than coincidental.
-#
+
 # Priority = which source's row wins when both have a row for the same
 # coordinates. harmon wins the harmon/patriot pair because Harmon Law
 # owns Patriot -- the primary source, not a data-completeness judgment
 # (an earlier version of this comment guessed at completeness; don't
 # reintroduce that reasoning without actually re-measuring it). patriot
-# wins the brockscott/patriot pair.
+# wins the brockscott/patriot pair. ct_judicial wins its pair because it's
+# the court's own record, and brockscott rows carry no photos/terms.
 
 DEDUP_SOURCE_PRIORITY = {
     frozenset({"landmark", "brockscott"}): ["landmark", "brockscott"],
     frozenset({"brockscott", "patriot"}): ["patriot", "brockscott"],
     frozenset({"sullivan", "brockscott"}): ["sullivan", "brockscott"],
     frozenset({"harmon", "patriot"}): ["harmon", "patriot"],
+    frozenset({"ct_judicial", "brockscott"}): ["ct_judicial", "brockscott"],
 }
 
 _STREET_ABBR = {

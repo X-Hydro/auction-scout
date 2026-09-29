@@ -366,8 +366,10 @@ def export(db_path: str, json_path: str):
         for r in excluded_stale[:10]:
             print("  [{}] {!r} (last seen {})".format(r["source"], r["address"], r["last_seen_at"]))
     if excluded_seasoning:
-        print("Excluded by seasoning rule (too far out AND not yet reconfirmed "
-              "by a second scrape): {}".format(len(excluded_seasoning)))
+        print("Excluded by seasoning rule (auction too far out AND not yet "
+              "re-seen {}+ days after first seen): {}".format(
+                  "/".join(str(r["window_days"]) for r in SEASONING_RULES.values()),
+                  len(excluded_seasoning)))
         for r in excluded_seasoning[:10]:
             print("  [{}] {!r} (auction {}, first seen {}, last seen {})".format(
                 r["source"], r["address"], r["auction_date"],
