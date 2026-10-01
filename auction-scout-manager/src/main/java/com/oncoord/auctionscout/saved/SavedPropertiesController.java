@@ -13,8 +13,10 @@ import java.util.Optional;
  * the two token-resolution methods (vs. findEmailByActiveSessionToken(),
  * which is deliberately looser and reserved for billing endpoints only).
  *
- * Saving (POST) additionally requires hasActiveStripeSubscription() --
- * trial or paid, same access -- matching how email alerts are gated.
+ * Saving (POST) additionally requires hasActiveAccess() -- Stripe
+ * subscription OR the card-free trial window, same entitlement that
+ * gates email alerts and the 3-state limit. (hasActiveStripeSubscription()
+ * alone would 403 every card-free trial user.)
  * There's no free tier for this feature. Viewing (GET) and removing
  * (DELETE) are deliberately NOT gated the same way: if a subscription
  * lapses, a subscriber should still be able to see and clean up what
@@ -43,7 +45,7 @@ public class SavedPropertiesController {
         if (email.isEmpty()) {
             return ResponseEntity.status(401).body(Map.of("error", "Invalid or expired session"));
         }
-        if (!subscribers.hasActiveStripeSubscription(email.get())) {
+        if (!subscribers.hasActiveAccess(email.get())) {
             return ResponseEntity.status(403).body(Map.of(
                     "error", "Saving properties requires an active subscription"
             ));

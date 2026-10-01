@@ -23,6 +23,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.util.HashMap;
@@ -78,6 +79,18 @@ class DigestServiceTest {
     private static final Path DB_PATH = TEST_DB_DIR.resolve("auctionscout-test.db");
     private static final Path MANAGER_DB_PATH = TEST_DB_DIR.resolve("auctionscout-manager-test.db");
     private static final String TEST_EMAIL = "subscriber@example.com";
+
+    /**
+     * An auction datetime `days` from today, in the same
+     * "yyyy-MM-ddT10:00:00" form the fixed fixtures use. Use this for any
+     * fixture that has to stay "far out": isSeasoned() compares against
+     * the real clock, so a hardcoded calendar date stops being far out
+     * once real time catches up to it (this broke tests on Sep 8 and
+     * Oct 1, 2026).
+     */
+    private static String daysFromToday(int days) {
+        return LocalDate.now().plusDays(days) + "T10:00:00";
+    }
 
     private SingleConnectionDataSource dataSource;
     private SingleConnectionDataSource managerDataSource;
@@ -1074,7 +1087,7 @@ class DigestServiceTest {
                 .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
                 .insert();
         long auctionId = testData.auction(propertyId)
-                .auctionDatetime("2027-09-15T10:00:00") // well beyond the 7-day window
+                .auctionDatetime(daysFromToday(60)) // well beyond the 7-day window
                 .insert();
         testData.event(auctionId, "first_seen")
                 .newValue("active")
@@ -1100,7 +1113,7 @@ class DigestServiceTest {
                 // apart -- well past the 7-day seasoning bar.
                 .insert();
         long auctionId = testData.auction(propertyId)
-                .auctionDatetime("2027-09-15T10:00:00")
+                .auctionDatetime(daysFromToday(60))
                 .insert();
         testData.event(auctionId, "first_seen")
                 .newValue("active")
@@ -1158,14 +1171,14 @@ class DigestServiceTest {
                 .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
                 .insert();
         long auctionId = testData.auction(propertyId)
-                .auctionDatetime("2026-09-20T10:00:00")
+                .auctionDatetime(daysFromToday(60))
                 .insert();
         testData.event(auctionId, "first_seen")
                 .newValue("active")
                 .insert();
         testData.event(auctionId, "date_change")
-                .oldValue("2026-09-10T10:00:00")
-                .newValue("2026-09-20T10:00:00")
+                .oldValue(daysFromToday(50))
+                .newValue(daysFromToday(60))
                 .insert();
 
         String html = digestService.render(
@@ -1197,7 +1210,7 @@ class DigestServiceTest {
                 .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
                 .insert();
         long auctionId = testData.auction(propertyId)
-                .auctionDatetime("2026-09-25T10:00:00")
+                .auctionDatetime(daysFromToday(60))
                 .insert();
         testData.event(auctionId, "first_seen")
                 .newValue("active")
@@ -1239,7 +1252,7 @@ class DigestServiceTest {
                 .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
                 .insert();
         long auctionId = testData.auction(propertyId)
-                .auctionDatetime("2027-09-15T10:00:00") // well beyond the 7-day window
+                .auctionDatetime(daysFromToday(60)) // well beyond the 7-day window
                 .insert();
         testData.event(auctionId, "first_seen")
                 .newValue("active")
@@ -1277,10 +1290,10 @@ class DigestServiceTest {
                 .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
                 .insert();
         long savedAuctionId = testData.auction(savedPropertyId)
-                .auctionDatetime("2027-09-15T10:00:00")
+                .auctionDatetime(daysFromToday(60))
                 .insert();
         long unsavedAuctionId = testData.auction(unsavedPropertyId)
-                .auctionDatetime("2027-09-15T10:00:00")
+                .auctionDatetime(daysFromToday(60))
                 .insert();
         testData.event(savedAuctionId, "first_seen").newValue("active").insert();
         testData.event(unsavedAuctionId, "first_seen").newValue("active").insert();
@@ -1554,11 +1567,11 @@ class DigestServiceTest {
                 .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
                 .insert();
         long auctionId = testData.auction(propertyId)
-                .auctionDatetime("2027-09-15T10:00:00") // well beyond the 7-day window
+                .auctionDatetime(daysFromToday(60)) // well beyond the 7-day window
                 .insert();
         testData.event(auctionId, "date_change")
-                .oldValue("2026-09-01T10:00:00")
-                .newValue("2027-09-15T10:00:00")
+                .oldValue(daysFromToday(50))
+                .newValue(daysFromToday(60))
                 .detectedAt("2026-07-14T09:00:00.000000+00:00")
                 .insert();
 
@@ -1572,7 +1585,7 @@ class DigestServiceTest {
                 "a saved property should generate an alert even far out and unseasoned -- "
                         + "the alert's whole input list is inherently the saved set");
         assertTrue(html.contains("11 Quarry Road, Nashua, NH"));
-        assertTrue(html.contains("2026-09-01 → 2027-09-15"));
+        assertTrue(html.contains(LocalDate.now().plusDays(50) + " → " + LocalDate.now().plusDays(60)));
     }
 
 
@@ -1663,7 +1676,7 @@ class DigestServiceTest {
                 .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
                 .insert();
         long auctionId = testData.auction(propertyId)
-                .auctionDatetime("2027-09-15T10:00:00")
+                .auctionDatetime(daysFromToday(60))
                 .insert();
         testData.event(auctionId, "first_seen")
                 .newValue("active")
@@ -1692,7 +1705,7 @@ class DigestServiceTest {
                 .lastSeenAt("2026-07-14T08:00:00.000000+00:00")
                 .insert();
         long auctionId = testData.auction(propertyId)
-                .auctionDatetime("2027-09-15T10:00:00")
+                .auctionDatetime(daysFromToday(60))
                 .insert();
         testData.event(auctionId, "first_seen")
                 .newValue("active")
