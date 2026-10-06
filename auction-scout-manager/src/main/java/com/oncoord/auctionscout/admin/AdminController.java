@@ -9,6 +9,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.util.HtmlUtils;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -78,7 +79,8 @@ public class AdminController {
             Tier tier = tierOf(s);
             rows.append("<tr class=\"").append(rowClass(tier)).append("\">")
                     .append(td(s.email()))
-                    .append(td(badge(tier)))
+                    .append(tdHtml(badge(tier)))
+                    .append(td(s.emailAlertsEnabled() ? "on" : "off"))
                     .append(td(s.stripeSubscriptionStatus()))
                     .append(td(formatMillis(s.subscriptionStartDate())))
                     .append(td(formatMillis(s.subscriptionEndDate())))
@@ -141,7 +143,7 @@ public class AdminController {
               </div>
               <table>
                 <thead><tr>
-                  <th>Email</th><th>Tier</th><th>Stripe Status</th>
+                  <th>Email</th><th>Tier</th><th>Email Alerts</th><th>Stripe Status</th>
                   <th>Trial/Sub Start</th><th>Ended</th><th>Created</th>
                 </tr></thead>
                 <tbody>
@@ -206,6 +208,15 @@ public class AdminController {
     }
 
     private String td(Object val) {
-        return "<td>" + (val == null || val.toString().isBlank() ? "—" : val) + "</td>";
+        if (val == null || val.toString().isBlank()) {
+            return "<td>—</td>";
+        }
+        return "<td>" + HtmlUtils.htmlEscape(val.toString()) + "</td>";
+    }
+
+    // Only for markup this class builds itself (the tier badge).
+    // Never pass DB or user values here.
+    private String tdHtml(String trustedHtml) {
+        return "<td>" + trustedHtml + "</td>";
     }
 }

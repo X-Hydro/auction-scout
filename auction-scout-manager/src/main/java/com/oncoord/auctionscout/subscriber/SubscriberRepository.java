@@ -548,6 +548,7 @@ public class SubscriberRepository {
     public record AdminSubscriberRow(
             String email,
             boolean isActive,
+            boolean emailAlertsEnabled,
             Long createdAt,
             Long subscriptionStartDate,
             Long subscriptionEndDate,
@@ -563,12 +564,13 @@ public class SubscriberRepository {
      */
     public List<AdminSubscriberRow> findAllForAdmin() {
         return jdbc.query(
-                "SELECT email, is_active, created_at, subscription_start_date, " +
+                "SELECT email, is_active, email_alerts_enabled, created_at, subscription_start_date, " +
                         "subscription_end_date, stripe_subscription_status " +
                         "FROM subscribers ORDER BY created_at DESC",
                 (rs, rowNum) -> new AdminSubscriberRow(
                         rs.getString("email"),
                         rs.getBoolean("is_active"),
+                        rs.getBoolean("email_alerts_enabled"),
                         rs.getObject("created_at") != null ? rs.getLong("created_at") : null,
                         rs.getObject("subscription_start_date") != null ? rs.getLong("subscription_start_date") : null,
                         rs.getObject("subscription_end_date") != null ? rs.getLong("subscription_end_date") : null,
