@@ -41,6 +41,8 @@ from datetime import datetime
 from base import AuctionSpider, classify_timing
 
 STATUS_PRIORITY = {"active": 2, "postponed": 1}
+_DATE_CELL_RE = re.compile(r"^\d{1,2}/\d{1,2}/\d{2,4}$")
+
 
 
 def _slug(text):
@@ -98,11 +100,11 @@ class TowneAuctionSpider(AuctionSpider):
 
         by_address = {}
 
-        for tr in table.find_all("tr")[1:]:  # skip header row
+        for tr in table.find_all("tr"):
             cells = tr.find_all("td")
             if len(cells) < 11:
                 continue
-
+                
             date_raw = cells[0].get_text(strip=True)
             time_raw = cells[1].get_text(strip=True)
             status_raw = cells[2].get_text(strip=True)
@@ -117,6 +119,15 @@ class TowneAuctionSpider(AuctionSpider):
             important_info = cells[10].get_text(strip=True)
 
             status_lower = status_raw.lower()
+            
+            if not _DATE_CELL_RE.match(date_raw):
+                # Header rendered with <td> ("Auction Date"), or a row with
+                # no usable date -- not an auction. Logged so a real listing
+                # with a missing date doesn't vanish unnoticed.
+                print(f"[towne] skipping non-auction row: {date_raw!r}")
+                continue
+            
+            
 
             if status_lower.startswith("postponed"):
                 status_key = "postponed"

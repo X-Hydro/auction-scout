@@ -117,7 +117,7 @@ class SullivanSpider(AuctionSpider):
             return []
 
         rows = []
-        for tr in table.find_all("tr")[1:]:  # skip header row
+        for tr in table.find_all("tr"):
             cells = tr.find_all("td")
             if len(cells) < 5:
                 continue

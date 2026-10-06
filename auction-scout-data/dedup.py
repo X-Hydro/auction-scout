@@ -79,8 +79,7 @@ def dedup_key(street, city_state):
     unit = unit_match.group(1).upper() if unit_match else ""
     return zip_code, normalize_street(street), unit
 
-
-def coord_key(lat, lon, precision=6):
+def coord_key(lat, lon, precision=5):
     """Rounded (lat, lon) pair for matching cross-source duplicates AFTER
     geocoding (e.g. in load_csv.py) -- much more reliable than
     normalize_street()/dedup_key() for this stage, since two rows for the

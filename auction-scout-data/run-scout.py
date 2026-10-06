@@ -345,6 +345,7 @@ STATE_RE = re.compile(r"\b([A-Z]{2})(?:\s+\d{5}(?:-\d{4})?)?\s*$")
 # Maine source, nothing confirmed to overlap with it so far.)
 DEDUP_SOURCE_PRIORITY = {
     frozenset({"landmark", "brockscott"}): ["landmark", "brockscott"],
+    frozenset({"sullivan", "brockscott"}): ["sullivan", "brockscott"],
 }
 
 # Common street-type words that show up spelled out on one site and

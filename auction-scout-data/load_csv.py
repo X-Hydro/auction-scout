@@ -322,7 +322,8 @@ def build_report(run_id, started_at, csv_path, db_path, records_found, records_n
         (run_id,),
     ).fetchall()
 
-    by_type = {"status_change": [], "date_change": [], "first_seen": [], "disappeared": []}
+    by_type = {"status_change": [], "date_change": [], "first_seen": [], "disappeared": [],
+               "reappeared": []}
     for event_type, old_value, new_value, address in events:
         if event_type in by_type:
             by_type[event_type].append((address, old_value, new_value))
@@ -363,6 +364,7 @@ def build_report(run_id, started_at, csv_path, db_path, records_found, records_n
                      lambda r: f"{r[0]:<40} {_fmt_dt(r[1])} -> {_fmt_dt(r[2])}"))
     L.extend(section("New listings", by_type["first_seen"], lambda r: r[0]))
     L.extend(section("Removed", by_type["disappeared"], lambda r: r[0]))
+    L.extend(section("Returned (previously removed)", by_type["reappeared"], lambda r: r[0]))
 
     L.append("FAILED ROWS")
     L.append("-" * REPORT_WIDTH)
@@ -599,6 +601,26 @@ def load(csv_path: str, db_path: str):
                 else:
                     auction_id, prior_status, prior_dt = prior
                     changed = False
+
+                    # A listing previously flagged 'disappeared' is back.
+                    # Record it -- export_json.py hides any auction whose
+                    # LATEST event is 'disappeared', so without this a
+                    # returning listing (e.g. one a spider bug skipped for a
+                    # run) stays off the map indefinitely even though
+                    # last_seen_at keeps advancing.
+                    last_event = cur.execute(
+                        """SELECT event_type FROM auction_events WHERE auction_id=?
+                           ORDER BY event_id DESC LIMIT 1""",
+                        (auction_id,),
+                    ).fetchone()
+                    if last_event and last_event[0] == "disappeared":
+                        cur.execute(
+                            """INSERT INTO auction_events
+                               (auction_id, event_type, old_value, new_value, detected_at, spider_run_id)
+                               VALUES (?, 'reappeared', NULL, ?, ?, ?)""",
+                            (auction_id, status, ts, run_id),
+                        )
+                        changed = True
                     if prior_status != status:
                         cur.execute(
                             """INSERT INTO auction_events
