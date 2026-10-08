@@ -209,7 +209,7 @@ def format_post(prop: dict) -> str:
         "🏠 Upcoming Real Estate Auction 🏠\n"
         f"{address}\n"
         f"{date_str} at {time_str}\n"
-        f"{map_url}"
+        f"Map: {map_url}"
     )
 
 
