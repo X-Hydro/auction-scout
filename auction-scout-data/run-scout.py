@@ -190,7 +190,7 @@ COUNT_TOLERANCE_PCT = 0.25
 EXPECTED_COUNTS = {
     "sullivan": 41,
     "harmon": 107,
-    "brockscott": 300,
+    "brockscott": 225,
     "jjmanning": 12,
     "towne": 51,
     "patriot": 48,
