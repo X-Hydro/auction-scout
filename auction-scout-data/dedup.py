@@ -33,6 +33,7 @@ DEDUP_SOURCE_PRIORITY = {
     frozenset({"sullivan", "brockscott"}): ["sullivan", "brockscott"],
     frozenset({"harmon", "patriot"}): ["harmon", "patriot"],
     frozenset({"ct_judicial", "brockscott"}): ["ct_judicial", "brockscott"],
+    frozenset({"sullivan", "harmon"}): ["sullivan", "harmon"],
 }
 
 _STREET_ABBR = {
