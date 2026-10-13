@@ -28,8 +28,11 @@ Parsing notes:
   Cancelled.</span>, but parse_detail() searches the whole page text for
   "cancel" rather than that specific element, so a future id/markup
   change doesn't silently break detection again. The town listing page
-  has no status column at all. Hence scrape_details=True and
-  parse_detail() below.
+  has no status column, but some rows carry a trailing "CANCELLED ..."
+  note after the address; parse_listing() uses that when present.
+  Detail pages are the authoritative source, hence scrape_details=True,
+  parse_detail() below, and cache_details=False (a cached detail result
+  is a cached status, which hid a cancellation for up to a day).
 
 Connectivity note:
 - sso.eservices.jud.ct.gov negotiates TLS with cipher/DH params that
@@ -149,6 +152,9 @@ class CTJudicialSpider(AuctionSpider):
     name = "ct_judicial"
     base_url = "https://sso.eservices.jud.ct.gov/foreclosures/Public"
     scrape_details = True
+    # Detail page is the only reliable cancellation source -- never serve
+    # it from the scraped-detail cache (see base.load_scraped_cache).
+    cache_details = False
     respect_robots = False
 
     # Single source of truth for run-scout.py's registry. Set to None once
@@ -295,10 +301,12 @@ class CTJudicialSpider(AuctionSpider):
 
                 desc_text = desc_cell.get_text(" ", strip=True)
                 desc_text = re.sub(r"\s+", " ", desc_text)
+                listing_cancelled = False
                 m = re.search(r"ADDRESS\s*:\s*(.*)$", desc_text, re.IGNORECASE)
                 if m:
                     sale_type = desc_text[: m.start()].strip().rstrip(":").strip()
                     address_raw = m.group(1).strip()
+                    listing_cancelled = bool(_TRAILING_NOTE_RE.search(address_raw))
                     address_raw = _TRAILING_NOTE_RE.sub("", address_raw).strip()
                 else:
                     sale_type, address_raw = desc_text, ""
@@ -316,7 +324,9 @@ class CTJudicialSpider(AuctionSpider):
                     "id": docket_no,
                     "url": url,
                     "date_time": date_time,
-                    "status": "active",  # cancellation is only knowable via parse_detail()
+                    # Listing-page note catches some cancellations; parse_detail()
+                    # is authoritative and can upgrade "active" to "cancelled".
+                    "status": "cancelled" if listing_cancelled else "active",
                     "street": street,
                     "city_state": city_state,
                     "county": "",  # not exposed on this page

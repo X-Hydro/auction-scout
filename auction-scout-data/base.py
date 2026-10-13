@@ -229,6 +229,11 @@ def load_scraped_cache(path=DEFAULT_SCRAPED_CACHE_PATH):
     cached status. This cache only exists to skip the *expensive* part:
     one HTTP request per individual listing's detail page.
 
+    Exception: a spider whose detail page is itself the status source
+    (e.g. ct_judicial, where cancellation only appears on the detail
+    page) sets cache_details = False. For those, caching parse_detail()
+    output would cache status, which is exactly what must stay current.
+
     Each entry: {"scraped_at": "<iso timestamp>", "data": {...}}
     A missing file just means no cache exists yet -- always returns a
     dict, empty or not. A corrupt file is treated the same way (see
@@ -282,6 +287,10 @@ class AuctionSpider(ABC):
     base_url = ""  # e.g. "https://example.com"
     skip_statuses = {"cancelled"}
     scrape_details = True
+    # Set False in a spider whose detail page carries status (see
+    # load_scraped_cache docstring). The cache is still written for
+    # inspection, just never read back for that spider.
+    cache_details = True
     request_delay = 1.0
     user_agent = "Mozilla/5.0 (compatible; auction-mapper/1.0; +research use)"
 
@@ -438,7 +447,7 @@ class AuctionSpider(ABC):
                 cache_key = f"{self.name}:{row['id']}"
                 cached = scraped_cache.get(cache_key)
 
-                if is_cache_fresh(cached):
+                if self.cache_details and is_cache_fresh(cached):
                     print(f"[{self.name}] ({i}/{total}) CACHED "
                           f"(< {SCRAPED_CACHE_MAX_AGE_DAYS}d old): {row['url']} "
                           f"-- {row.get('street', '')}, {row.get('city_state', '')}")
