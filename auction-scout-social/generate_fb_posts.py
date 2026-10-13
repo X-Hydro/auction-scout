@@ -16,8 +16,10 @@ with the latest auction date referenced in that post. Run with --cleanup
 any logged post whose auctions have all already happened.
 
 Selection rule (per user spec):
-    - only auctions in the future (auction_date >= now)
-    - only auctions happening within the next 2 days (auction_date <= now + 2 days)
+    - only auctions at least MIN_DAYS_OUT calendar days away (default 2:
+      nothing today or tomorrow -- Facebook group moderators can take a
+      day or more to approve a post, and readers need time to plan)
+    - only auctions within MAX_DAYS_OUT days (auction_date <= now + MAX_DAYS_OUT)
     - only auctions not in a terminal status (statuses.EXCLUDED_STATUSES --
       e.g. sold, cancelled, withdrawn, or already-past-due)
     - earliest auction_date first within each state
@@ -66,8 +68,15 @@ STATE_QUOTAS = {
 # Order states appear in the output
 STATE_ORDER = ["MA", "CT", "NH", "VT", "ME", "RI"]
 
-# Only include auctions happening within this many days from "now"
-MAX_DAYS_OUT = 5
+# Only include auctions at least this many calendar days out. 2 means
+# nothing today or tomorrow: group moderators can take 1+ days to approve
+# a post, and an auction tomorrow leaves readers no time to act anyway.
+MIN_DAYS_OUT = 2
+
+# Only include auctions happening within this many days from "now".
+# Shifted out by one day along with MIN_DAYS_OUT to keep the window the
+# same width as before.
+MAX_DAYS_OUT = 6
 
 BASE_MAP_URL = "https://www.oncoord.com/auction-scout/"
 STATUS_PAGE_URL = "https://www.oncoord.com/auction-scout/status.html"
@@ -145,6 +154,7 @@ def select_properties(properties: list[dict], now: datetime) -> tuple[dict[str, 
     Returns (by_state, extra_counts) -- extra_counts[state] is how many
     eligible properties in that state didn't make the cut, for the "+N
     more" teaser in the post."""
+    earliest_date = (now + timedelta(days=MIN_DAYS_OUT)).date()
     cutoff = now + timedelta(days=MAX_DAYS_OUT)
     by_state: dict[str, list[dict]] = {state: [] for state in STATE_QUOTAS}
 
@@ -159,9 +169,11 @@ def select_properties(properties: list[dict], now: datetime) -> tuple[dict[str, 
         if prop.get("status") in EXCLUDED_STATUSES:
             continue
         dt = parse_auction_date(prop.get("auction_date"))
-        if dt is None or dt < now or dt > cutoff:
+        if dt is None or dt > cutoff:
             continue
-        if dt.date() == now.date():
+        # Calendar-date comparison, not a 48h timedelta: an auction at 9 AM
+        # two days from now still qualifies when this runs at 5 PM today.
+        if dt.date() < earliest_date:
             continue
         if prop.get("latitude") is None or prop.get("longitude") is None:
             continue
