@@ -26,7 +26,7 @@ from urllib.parse import urlparse, parse_qs
 
 from dateutil import parser as dateparser
 
-from dedup import coord_key, winning_source
+from dedup import cluster_by_distance, winning_source
 from statuses import ACTIVE_STATUS, EXCLUDED_STATUSES, normalize_status, PAST_DUE_STATUS
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -477,18 +477,18 @@ def load(csv_path: str, db_path: str):
         # vs "Fall River"). Matched here on rounded (lat, lon) instead --
         # by the time a row is in this CSV it's already been geocoded
         # (rows with no coordinates never make it in, see run-scout.py's
-        # write_csv), so two independently-geocoded rows for the truly
-        # same address consistently land on the identical point, while
-        # genuinely different properties do not.
-        coord_groups = {}
-        for entry in rows_to_process:
-            _, row, _ = entry
-            key = coord_key(row["Latitude"], row["Longitude"])
-            coord_groups.setdefault(key, []).append(entry)
+        # write_csv). Two independently-geocoded rows for the same address
+        # land within centimetres of each other -- but NOT always on the
+        # identical point (see dedup.COORD_MATCH_TOLERANCE_M), so this
+        # matches by distance rather than by exact rounded coordinates.
+        coord_groups = cluster_by_distance(
+            rows_to_process,
+            lambda e: (float(e[1]["Latitude"]), float(e[1]["Longitude"])),
+        )
 
         deduped_rows = []
         cross_dupes_dropped = 0
-        for key, group in coord_groups.items():
+        for group in coord_groups:
             if len(group) == 1:
                 deduped_rows.append(group[0])
                 continue

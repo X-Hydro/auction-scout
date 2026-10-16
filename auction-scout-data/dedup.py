@@ -16,6 +16,7 @@ overlap first (same property listed independently by two sources), same
 as the landmark/brockscott and harmon/patriot entries below.
 """
 
+import math
 import re
 
 
@@ -97,6 +98,61 @@ def coord_key(lat, lon, precision=5):
     there's no "unkeyable" case to handle here the way dedup_key() has
     for missing zips."""
     return (round(float(lat), precision), round(float(lon), precision))
+
+
+# Max distance between two geocoded points still treated as the same
+# property. Rounding to N decimals (coord_key) can't do this job: two
+# points 0.22 m apart can straddle a rounding boundary at ANY precision --
+# confirmed 2026-10-16 with "100 Wheelock Rd, Sutton, MA" (brockscott
+# 42.162716732728,-71.765976591887 vs patriot 42.16271806473,
+# -71.76597458466: different keys at precision 5 AND 6). Same-address
+# geocodes differ by centimetres; distinct buildings are metres apart,
+# so 2 m separates the two cases with room on both sides.
+COORD_MATCH_TOLERANCE_M = 2.0
+
+_EARTH_RADIUS_M = 6_371_000
+_M_PER_DEG_LAT = 111_320
+
+
+def _distance_m(a, b):
+    """Equirectangular distance in metres -- exact enough at the few-metre
+    scale this is used for, and far cheaper than haversine."""
+    (lat1, lon1), (lat2, lon2) = a, b
+    x = math.radians(lon2 - lon1) * math.cos(math.radians((lat1 + lat2) / 2))
+    y = math.radians(lat2 - lat1)
+    return _EARTH_RADIUS_M * math.hypot(x, y)
+
+
+def cluster_by_distance(items, coords_of, tolerance_m=COORD_MATCH_TOLERANCE_M):
+    """Group items whose coordinates are within tolerance_m of each other
+    (transitively -- A~B and B~C puts A, B, C in one group). coords_of(item)
+    -> (lat, lon) floats. Returns a list of groups, each preserving the
+    input order of its items. Replaces grouping by coord_key() in
+    load_csv.py; see COORD_MATCH_TOLERANCE_M for why."""
+    pts = [coords_of(it) for it in items]
+    parent = list(range(len(items)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    # Sweep in latitude order so each point is only compared with the few
+    # neighbours inside the tolerance band, not every other row.
+    order = sorted(range(len(items)), key=lambda i: pts[i][0])
+    band = tolerance_m / _M_PER_DEG_LAT
+    for n, i in enumerate(order):
+        for j in order[n + 1:]:
+            if pts[j][0] - pts[i][0] > band:
+                break
+            if _distance_m(pts[i], pts[j]) <= tolerance_m:
+                parent[find(i)] = find(j)
+
+    groups = {}
+    for i, item in enumerate(items):
+        groups.setdefault(find(i), []).append(item)
+    return list(groups.values())
 
 
 def winning_source(sources_present):
